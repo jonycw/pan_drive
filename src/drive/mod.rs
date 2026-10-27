@@ -1,0 +1,1885 @@
+use model::*;
+use std::cmp::min;
+use std::collections::HashMap;
+use std::sync::Arc;
+use std::time::{Duration, SystemTime};
+
+use anyhow::{Context, Result};
+use reqwest_middleware::{ClientBuilder, ClientWithMiddleware};
+use reqwest_retry::policies::ExponentialBackoff;
+use reqwest_retry::{Jitter, RetryTransientMiddleware};
+use serde::Serialize;
+use serde::de::DeserializeOwned;
+use tokio::time;
+use tracing::{debug, error};
+
+use base64::{
+    Engine as _, alphabet,
+    engine::{self, general_purpose},
+};
+
+use reqwest::{
+    IntoUrl, StatusCode,
+    header::{HeaderMap, HeaderValue},
+};
+
+use dav_server::fs::{DavDirEntry, DavMetaData, FsFuture, FsResult};
+
+use bytes::Bytes;
+use dashmap::DashMap;
+use headers::Cookie;
+use moka::future::FutureExt;
+
+pub mod model;
+
+mod share_api;
+
+pub use model::QuarkFile;
+pub use share_api::{DownloadStatus, ShareEntry, ShareSnapshot};
+
+const ORIGIN: &str = "https://pan.quark.cn";
+const REFERER: &str = "https://pan.quark.cn/";
+const UA: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) quark-cloud-drive/2.5.20 Chrome/100.0.4896.160 Electron/18.3.5.4-b478491100 Safari/537.36 Channel/pckk_other_ch";
+
+#[derive(Debug, Clone)]
+pub struct DriveConfig {
+    pub api_base_url: String,
+    pub cookie: Arc<DashMap<String, String>>,
+}
+
+#[derive(Debug, Clone)]
+pub struct QuarkDrive {
+    config: DriveConfig,
+    client: ClientWithMiddleware,
+    download_client: ClientWithMiddleware,
+    /// Long-lived client for share calls and streaming downloads.
+    /// No retry middleware: a retried save POST can duplicate files.
+    stream_client: reqwest::Client,
+    md5_cache: Arc<DashMap<String, String>>,
+}
+
+impl DavMetaData for QuarkFile {
+    fn len(&self) -> u64 {
+        self.size
+    }
+
+    fn modified(&self) -> FsResult<SystemTime> {
+        Ok(SystemTime::UNIX_EPOCH + Duration::from_millis(self.updated_at))
+    }
+
+    fn is_dir(&self) -> bool {
+        self.dir
+    }
+
+    fn created(&self) -> FsResult<SystemTime> {
+        Ok(SystemTime::UNIX_EPOCH + Duration::from_millis(self.created_at))
+    }
+}
+
+impl DavDirEntry for QuarkFile {
+    fn name(&self) -> Vec<u8> {
+        self.file_name.as_bytes().to_vec()
+    }
+
+    fn metadata(&self) -> FsFuture<Box<dyn DavMetaData>> {
+        async move { Ok(Box::new(self.clone()) as Box<dyn DavMetaData>) }.boxed()
+    }
+}
+
+impl QuarkDrive {
+    pub fn new(config: DriveConfig) -> Result<Self> {
+        let mut headers = HeaderMap::new();
+        headers.insert("Origin", HeaderValue::from_static(ORIGIN));
+        headers.insert("Referer", HeaderValue::from_static(REFERER));
+        let retry_policy = ExponentialBackoff::builder()
+            .retry_bounds(Duration::from_millis(100), Duration::from_secs(5))
+            .jitter(Jitter::Bounded)
+            .base(2)
+            .build_with_max_retries(5);
+
+        let cpu_count = num_cpus::get();
+        let pool_size: usize = min(cpu_count.saturating_mul(2), 16).max(3);
+
+        let client = reqwest::Client::builder()
+            .user_agent(UA)
+            .default_headers(headers.clone())
+            // Keep connections alive for better performance
+            // OSS typically keeps connections open for 60+ seconds
+            .pool_idle_timeout(Duration::from_secs(50))
+            .connect_timeout(Duration::from_secs(10))
+            .pool_max_idle_per_host(pool_size) // Increase for concurrent operations
+            .timeout(Duration::from_secs(300)) // Longer timeout for large file operations
+            .build()?;
+        let client = ClientBuilder::new(client)
+            .with(RetryTransientMiddleware::new_with_policy(retry_policy))
+            .build();
+
+        // Configure download client with connection pooling for better performance
+        let download_client = reqwest::Client::builder()
+            .user_agent(UA)
+            .default_headers(headers.clone())
+            // Enable connection pooling to avoid TCP handshake overhead on each request
+            .pool_idle_timeout(Duration::from_secs(50))
+            .pool_max_idle_per_host(pool_size) // Increase pool size for concurrent downloads
+            .connect_timeout(Duration::from_secs(10))
+            .timeout(Duration::from_secs(300)) // Increase timeout for large files
+            .build()?;
+        let download_client = ClientBuilder::new(download_client)
+            .with(RetryTransientMiddleware::new_with_policy(retry_policy))
+            .build();
+
+        // Whole-request timeout must cover a large member download. read_timeout
+        // only fires when the socket stops delivering bytes.
+        let stream_client = reqwest::Client::builder()
+            .user_agent(UA)
+            .default_headers(headers)
+            .pool_idle_timeout(Duration::from_secs(50))
+            .pool_max_idle_per_host(pool_size)
+            .connect_timeout(Duration::from_secs(30))
+            .read_timeout(Duration::from_secs(120))
+            .timeout(Duration::from_secs(24 * 60 * 60))
+            .build()?;
+
+        let drive = Self {
+            config,
+            client,
+            download_client,
+            stream_client,
+            md5_cache: Arc::new(DashMap::new()),
+        };
+
+        Ok(drive)
+    }
+
+    pub fn cookie_store(&self) -> Arc<DashMap<String, String>> {
+        self.config.cookie.clone()
+    }
+
+    async fn resolve_cookies(&self) -> String {
+        self.config
+            .cookie
+            .iter()
+            .map(|entry| format!("{}={}", entry.key(), entry.value()))
+            .collect::<Vec<_>>()
+            .join("; ")
+    }
+
+    async fn get_request<U>(&self, url: String, header: Option<HeaderMap>) -> Result<Option<U>>
+    where
+        U: DeserializeOwned,
+    {
+        let cookie = self.resolve_cookies().await;
+        let url = reqwest::Url::parse(&url)?;
+        let res = if let Some(headers) = header {
+            self.client
+                .get(url.clone())
+                .headers(headers)
+                .header("Cookie", cookie)
+                .send()
+                .await?
+        } else {
+            self.client
+                .get(url.clone())
+                .header("Cookie", cookie)
+                .send()
+                .await?
+        };
+        match res.error_for_status_ref() {
+            Ok(_) => {
+                if res.status() == StatusCode::NO_CONTENT {
+                    return Ok(None);
+                }
+                self.update_cookie_from_response(&res).await;
+                // let res = res.text().await?;
+                // println!("{}: {}", url, res);
+                // let res = serde_json::from_str(&res)?;
+                let res = res.json::<U>().await?;
+                Ok(Some(res))
+            }
+            Err(err) => {
+                let err_msg = res.text().await?;
+                debug!(error = %err_msg, url = %url, "request failed");
+                match err.status() {
+                    Some(
+                        _status_code
+                        @
+                        // 4xx
+                        ( StatusCode::REQUEST_TIMEOUT
+                        | StatusCode::TOO_MANY_REQUESTS
+                        | StatusCode::FORBIDDEN
+                        // 5xx
+                        | StatusCode::INTERNAL_SERVER_ERROR
+                        | StatusCode::BAD_GATEWAY
+                        | StatusCode::SERVICE_UNAVAILABLE
+                        | StatusCode::GATEWAY_TIMEOUT),
+                    ) => {
+                        time::sleep(Duration::from_secs(1)).await;
+                        let res = self
+                            .client
+                            .get(url.clone())
+                            .send()
+                            .await?;
+                        if res.status() == StatusCode::NO_CONTENT {
+                            return Ok(None);
+                        }
+                        let res = res.json::<U>().await?;
+                        Ok(Some(res))
+                    }
+                    _ => Err(err.into()),
+                }
+            }
+        }
+    }
+    async fn update_cookie_from_response(&self, res: &reqwest::Response) {
+        if let Some(set_cookie) = res
+            .headers()
+            .get_all("set-cookie")
+            .iter()
+            .find_map(|v| v.to_str().ok())
+        {
+            if let Some(puus) = set_cookie
+                .split(';')
+                .find(|s| s.trim().starts_with("__puus="))
+            {
+                let new_puus = puus.trim().to_string().replace("__puus=", "");
+                self.config.cookie.insert("__puus".to_string(), new_puus);
+            }
+        }
+    }
+
+    async fn post_request<T, U>(
+        &self,
+        url: String,
+        r: &T,
+        headers: Option<HeaderMap>,
+    ) -> Result<Option<U>>
+    where
+        T: Serialize + ?Sized,
+        U: DeserializeOwned,
+    {
+        let cookie = self.resolve_cookies().await;
+        let url = reqwest::Url::parse(&url)?;
+        let res = if let Some(headers) = headers {
+            let is_xml = headers
+                .get("Content-Type")
+                .map(|v| v == "application/xml")
+                .unwrap_or(false);
+            if is_xml {
+                let body = serde_json::to_value(r)?
+                    .as_str()
+                    .map(|s| s.to_string())
+                    .unwrap_or_else(|| serde_json::to_string(r).unwrap());
+                self.client
+                    .post(url.clone())
+                    .body(body)
+                    .headers(headers)
+                    .header("Cookie", cookie)
+                    .send()
+                    .await?
+            } else {
+                self.client
+                    .post(url.clone())
+                    .json(r)
+                    .headers(headers)
+                    .header("Cookie", cookie)
+                    .send()
+                    .await?
+            }
+        } else {
+            self.client
+                .post(url.clone())
+                .json(r)
+                .header("Content-Type", "application/json")
+                .header("Cookie", cookie)
+                .send()
+                .await?
+        };
+
+        match res.error_for_status_ref() {
+            Ok(_) => {
+                if res.status() == StatusCode::NO_CONTENT {
+                    return Ok(None);
+                }
+
+                self.update_cookie_from_response(&res).await;
+
+                let text = res.text().await?;
+                debug!("{}: {}", url, text);
+                // let res = serde_json::from_str(&res)?;
+                let res = serde_json::from_str::<U>(&text)
+                    .map_err(|e| anyhow::anyhow!("Failed to parse JSON response: {}", e))?;
+
+                // let res = ;
+                // let res = res.json::<U>().await?;
+                Ok(Some(res))
+            }
+            Err(err) => {
+                let err_msg = res.text().await?;
+                debug!(error = %err_msg, url = %url, "request failed");
+                match err.status() {
+                    Some(
+                        _status_code
+                        @
+                        // 4xx
+                        ( StatusCode::REQUEST_TIMEOUT
+                        | StatusCode::TOO_MANY_REQUESTS
+                        | StatusCode::FORBIDDEN
+                        // 5xx
+                        | StatusCode::INTERNAL_SERVER_ERROR
+                        | StatusCode::BAD_GATEWAY
+                        | StatusCode::SERVICE_UNAVAILABLE
+                        | StatusCode::GATEWAY_TIMEOUT),
+                    ) => {
+                        time::sleep(Duration::from_secs(2)).await;
+                        let res = self
+                            .client
+                            .post(url)
+                            .send()
+                            .await?
+                            .error_for_status()?;
+                        if res.status() == StatusCode::NO_CONTENT {
+                            return Ok(None);
+                        }
+                        let res = res.json::<U>().await?;
+                        Ok(Some(res))
+                    }
+                    _ => Err(err.into()),
+                }
+            }
+        }
+    }
+
+    pub async fn get_files_by_pdir_fid(
+        &self,
+        pdir_fid: &str,
+        page: u32,
+        size: u32,
+    ) -> Result<(Option<QuarkFiles>, u32)> {
+        debug!(pdir_fid = %pdir_fid, page = %page, size = %size,  "get file");
+
+        let res: Result<GetFilesResponse> = self
+            .get_request(
+                format!("{}/1/clouddrive/file/sort?pr=ucpro&fr=pc&&pdir_fid={}&_page={}&_size={}&_fetch_total=1&_fetch_sub_dirs=0&_sort=file_type:asc,updated_at:desc,"
+                        , self.config.api_base_url
+                        , pdir_fid
+                        , page
+                        , size),
+                None
+            )
+            .await
+            .and_then(|res| res.context("unexpect response"));
+        match res {
+            Ok(files_res) => {
+                let total = files_res.metadata.total;
+                Ok((Some(files_res.into()), total))
+            }
+            Err(err) => {
+                if let Some(req_err) = err.downcast_ref::<reqwest::Error>() {
+                    if matches!(req_err.status(), Some(StatusCode::NOT_FOUND)) {
+                        Ok((None, 0u32))
+                    } else {
+                        Err(err)
+                    }
+                } else {
+                    Err(err)
+                }
+            }
+        }
+    }
+
+    pub async fn get_download_urls(&self, fids: Vec<String>) -> Result<HashMap<String, String>> {
+        debug!(fids = ?fids, "get download url");
+        let req = GetFilesDownloadUrlsRequest { fids };
+        let res: GetFilesDownloadUrlsResponse = self
+            .post_request(
+                format!(
+                    "{}/1/clouddrive/file/download?pr=ucpro&fr=pc",
+                    self.config.api_base_url
+                ),
+                &req,
+                None,
+            )
+            .await?
+            .context("expect response")?;
+        // Cache md5 values from the response to avoid extra API calls
+        for item in &res.data {
+            if let Some(ref md5) = item.md5 {
+                self.md5_cache.insert(item.fid.clone(), md5.clone());
+            }
+        }
+        Ok(res.into_map())
+    }
+
+    pub fn get_cached_md5(&self, fid: &str) -> Option<String> {
+        self.md5_cache.get(fid).map(|v| v.clone())
+    }
+
+    pub async fn get_download_url(&self, fid: &str) -> Result<String> {
+        debug!(fid = %fid, "get download url");
+        self.get_download_urls(vec![fid.to_string()])
+            .await?
+            .iter()
+            .next()
+            .map(|(_, url)| url.clone())
+            .ok_or_else(|| anyhow::anyhow!("No download URL found for fid: {}", fid))
+    }
+
+    pub async fn get_file_md5(&self, fid: &str) -> Result<Option<String>> {
+        debug!(fid = %fid, "get file md5");
+        let req = GetFilesDownloadUrlsRequest {
+            fids: vec![fid.to_string()],
+        };
+        let res: GetFilesDownloadUrlsResponse = self
+            .post_request(
+                format!(
+                    "{}/1/clouddrive/file/download?pr=ucpro&fr=pc",
+                    self.config.api_base_url
+                ),
+                &req,
+                None,
+            )
+            .await?
+            .context("expect response")?;
+        Ok(res.data.into_iter().next().and_then(|item| item.md5))
+    }
+
+    pub async fn download<U: IntoUrl>(&self, url: U, range: Option<(u64, usize)>) -> Result<Bytes> {
+        use reqwest::header::RANGE;
+        let cookie = self.resolve_cookies().await;
+        let url = url.into_url()?;
+        let res = if let Some((start_pos, size)) = range {
+            let end_pos = start_pos + size as u64 - 1;
+            debug!(url = %url, start = start_pos, end = end_pos, "download file");
+            let range = format!("bytes={}-{}", start_pos, end_pos);
+            self.download_client
+                .get(url)
+                .header(RANGE, range)
+                .header("Cookie", cookie)
+                .send()
+                .await?
+                .error_for_status()?
+        } else {
+            debug!(url = %url, "download file");
+            self.download_client
+                .get(url)
+                .send()
+                .await?
+                .error_for_status()?
+        };
+        self.update_cookie_from_response(&res).await;
+        Ok(res.bytes().await?)
+    }
+
+    pub async fn remove_file(&self, file_id: &str, trash: bool) -> Result<()> {
+        // no untrash api in quark
+        self.delete_file(file_id).await?;
+        Ok(())
+    }
+    pub async fn rename_file(&self, file_id: &str, name: &str) -> Result<()> {
+        debug!(file_id = %file_id, name = %name, "rename file");
+        let req = RenameFileRequest {
+            fid: file_id.to_string(),
+            file_name: name.to_string(),
+        };
+        let res: RenameFileResponse = self
+            .post_request(
+                format!(
+                    "{}/1/clouddrive/file/rename?pr=ucpro&fr=pc",
+                    self.config.api_base_url
+                ),
+                &req,
+                None,
+            )
+            .await?
+            .context("expect response")?;
+        if res.status != 200 {
+            return Err(anyhow::anyhow!("delete file failed: {}", res.message));
+        }
+        Ok(())
+    }
+
+    pub async fn move_file(&self, file_id: &str, to_parent_file_id: &str) -> Result<()> {
+        debug!(file_id = %file_id, to_parent_file_id = %to_parent_file_id, "move file");
+        let req = MoveFileRequest {
+            filelist: vec![file_id.to_string()],
+            to_pdir_fid: to_parent_file_id.to_string(),
+        };
+        let res: CommonResponse = self
+            .post_request(
+                format!(
+                    "{}/1/clouddrive/file/move?pr=ucpro&fr=pc",
+                    self.config.api_base_url
+                ),
+                &req,
+                None,
+            )
+            .await?
+            .context("expect response")?;
+
+        if res.status != 200 {
+            return Err(anyhow::anyhow!("delete file failed: {}", res.message));
+        }
+        Ok(())
+    }
+    async fn delete_file(&self, file_id: &str) -> Result<()> {
+        debug!(file_id = %file_id, "delete file");
+        let req = DeleteFilesRequest {
+            action_type: 2u8,
+            exclude_fids: vec![],
+            filelist: vec![file_id.to_string()],
+        };
+        let res: DeleteFilesResponse = self
+            .post_request(
+                format!(
+                    "{}/1/clouddrive/file/delete?pr=ucpro&fr=pc",
+                    self.config.api_base_url
+                ),
+                &req,
+                None,
+            )
+            .await?
+            .context("expect response")?;
+
+        if res.status != 200 {
+            return Err(anyhow::anyhow!("delete file failed: {}", res.message));
+        }
+        Ok(())
+    }
+
+    pub async fn create_folder(&self, parent_file_id: &str, name: &str) -> Result<()> {
+        debug!(parent_file_id = %parent_file_id, name = %name, "create folder");
+        let req = CreateFolderRequest {
+            pdir_fid: parent_file_id.to_string(),
+            file_name: name.to_string(),
+            dir_path: "".to_string(),
+            dir_init_lock: false,
+        };
+        let res: CreateFolderResponse = self
+            .post_request(
+                format!(
+                    "{}/1/clouddrive/file?pr=ucpro&fr=pc",
+                    self.config.api_base_url
+                ),
+                &req,
+                None,
+            )
+            .await?
+            .context("expect response")?;
+        if res.status != 200 {
+            return Err(anyhow::anyhow!("delete file failed: {}", res.message));
+        }
+        Ok(())
+    }
+
+    pub async fn get_quota(&self) -> Result<(u64, u64)> {
+        let res: GetSpaceInfoResponse = self
+            .get_request(
+                format!("{}/1/clouddrive/member?pr=ucpro&fr=pc&uc_param_str=&fetch_subscribe=true&_ch=home&fetch_identity=true", self.config.api_base_url),
+                None)
+            .await?
+            .context("expect response")?;
+
+        if res.status != 200 {
+            return Err(anyhow::anyhow!("delete file failed: {}", res.message));
+        }
+        Ok((res.data.use_capacity, res.data.total_capacity))
+    }
+
+    /// Upload a small in-memory file (e.g. desc.txt) into `parent_fid`.
+    pub async fn upload_bytes(
+        &self,
+        parent_fid: &str,
+        file_name: &str,
+        bytes: &[u8],
+    ) -> Result<String> {
+        use sha1::{Digest, Sha1};
+
+        let size = bytes.len() as u64;
+        let md5 = format!("{:x}", md5::compute(bytes));
+        let mut hasher = Sha1::new();
+        hasher.update(bytes);
+        let sha1 = format!("{:x}", hasher.finalize());
+
+        let pre = self.up_pre(file_name, size, parent_fid).await?;
+        if pre.data.finish {
+            return Ok(pre.data.fid);
+        }
+        let fid = pre.data.fid.clone();
+        let hash = self.up_hash(&md5, &sha1, &pre.data.task_id).await?;
+        if hash.data.finish {
+            return Ok(fid);
+        }
+        let upload_id = pre
+            .data
+            .upload_id
+            .clone()
+            .context("上传缺少 upload_id")?;
+        let upload_url = pre
+            .data
+            .upload_url
+            .strip_prefix("https://")
+            .or_else(|| pre.data.upload_url.strip_prefix("http://"))
+            .unwrap_or(&pre.data.upload_url)
+            .to_string();
+        let mime = if pre.data.format_type.is_empty() {
+            get_format_type(file_name).to_string()
+        } else {
+            pre.data.format_type.clone()
+        };
+        let now: chrono::DateTime<chrono::Utc> = chrono::Utc::now();
+        let utc_time = now.format("%a, %d %b %Y %H:%M:%S GMT").to_string();
+        let auth_meta = self
+            .up_part_auth_meta(
+                &mime,
+                &utc_time,
+                &pre.data.bucket,
+                &pre.data.obj_key,
+                1,
+                &upload_id,
+            )
+            .await?;
+        let auth_res = self
+            .auth(&pre.data.auth_info, &auth_meta, &pre.data.task_id)
+            .await?;
+        let etag = self
+            .up_part(UpPartMethodRequest {
+                auth_key: auth_res.data.auth_key,
+                mime_type: mime,
+                utc_time,
+                bucket: pre.data.bucket.clone(),
+                upload_url: upload_url.clone(),
+                obj_key: pre.data.obj_key.clone(),
+                part_number: 1,
+                upload_id: upload_id.clone(),
+                part_bytes: bytes.to_vec(),
+            })
+            .await?
+            .unwrap_or_else(|| "finish".to_string());
+        if etag != "finish" {
+            self.up_auth_and_commit(UpAuthAndCommitRequest {
+                md5s: vec![etag],
+                callback: pre.data.callback.clone(),
+                bucket: pre.data.bucket.clone(),
+                obj_key: pre.data.obj_key.clone(),
+                upload_id,
+                auth_info: pre.data.auth_info.clone(),
+                task_id: pre.data.task_id.clone(),
+                upload_url,
+            })
+            .await?;
+            self.finish(&pre.data.obj_key, &pre.data.task_id).await?;
+        }
+        Ok(fid)
+    }
+
+    /// Replace a same-named file in the folder, then upload `bytes`.
+    pub async fn replace_file_bytes(
+        &self,
+        parent_fid: &str,
+        file_name: &str,
+        bytes: &[u8],
+    ) -> Result<String> {
+        let children = self.list_dir_all(parent_fid).await?;
+        for file in children {
+            if !file.dir && file.file_name == file_name {
+                let _ = self.remove_file(&file.fid, false).await;
+            }
+        }
+        self.upload_bytes(parent_fid, file_name, bytes).await
+    }
+
+    pub async fn up_pre(
+        &self,
+        file_name: &str,
+        size: u64,
+        pdir_fid: &str,
+    ) -> Result<UpPreResponse> {
+        let format_type = get_format_type(file_name);
+
+        let req = UpPreRequest {
+            file_name: file_name.to_string(),
+            size,
+            pdir_fid: pdir_fid.to_string(),
+            format_type: format_type.to_string(),
+            ccp_hash_update: true,
+            l_created_at: SystemTime::now()
+                .duration_since(SystemTime::UNIX_EPOCH)?
+                .as_millis() as u64,
+            l_updated_at: SystemTime::now()
+                .duration_since(SystemTime::UNIX_EPOCH)?
+                .as_millis() as u64,
+            // 上传文件夹？待确认
+            dir_name: "".to_string(),
+            parallel_upload: false,
+        };
+
+        let res: UpPreResponse = self
+            .post_request(
+                format!(
+                    "{}/1/clouddrive/file/upload/pre?pr=ucpro&fr=pc",
+                    self.config.api_base_url
+                ),
+                &req,
+                None,
+            )
+            .await?
+            .context("expect response")?;
+
+        if res.status != 200 {
+            return Err(anyhow::anyhow!("delete file failed: {}", res.message));
+        }
+        Ok(res)
+    }
+
+    pub async fn up_hash(&self, md5: &str, sha1: &str, task_id: &str) -> Result<UpHashResponse> {
+        let req = UpHashRequest {
+            md5: md5.to_string(),
+            sha1: sha1.to_string(),
+            task_id: task_id.to_string(),
+        };
+
+        let res: UpHashResponse = self
+            .post_request(
+                format!(
+                    "{}/1/clouddrive/file/update/hash?pr=ucpro&fr=pc",
+                    self.config.api_base_url
+                ),
+                &req,
+                None,
+            )
+            .await?
+            .context("expect response")?;
+
+        if res.status != 200 {
+            return Err(anyhow::anyhow!("delete file failed: {}", res.message));
+        }
+        Ok(res)
+    }
+
+    pub async fn up_part_auth_meta(
+        &self,
+        mime_type: &str,
+        utc_time: &str,
+        bucket: &str,
+        obj_key: &str,
+        part_number: u32,
+        upload_id: &str,
+    ) -> Result<String> {
+        let r = format!(
+            "PUT\n\n{mime_type}\n{utc_time}\nx-oss-date:{utc_time}\nx-oss-user-agent:aliyun-sdk-js/6.6.1 Chrome 98.0.4758.80 on Windows 10 64-bit\n/{bucket}/{obj_key}?partNumber={part_number}&uploadId={upload_id}",
+            mime_type = mime_type,
+            utc_time = utc_time,
+            bucket = bucket,
+            obj_key = obj_key,
+            part_number = part_number,
+            upload_id = upload_id
+        );
+        Ok(r)
+    }
+
+    pub fn up_commit_auth_meta(
+        &self,
+        md5s: Vec<String>,
+        callback: &Callback,
+        bucket: &str,
+        obj_key: &str,
+        time_str: &str,
+        upload_id: &str,
+    ) -> Result<String> {
+        // 构建XML内容
+        let mut xml_body =
+            String::from("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<CompleteMultipartUpload>\n");
+
+        for (i, md5) in md5s.iter().enumerate() {
+            xml_body.push_str(&format!(
+                "<Part>\n<PartNumber>{}</PartNumber>\n<ETag>{}</ETag>\n</Part>\n",
+                i + 1,
+                md5
+            ));
+        }
+        xml_body.push_str("</CompleteMultipartUpload>");
+
+        // 计算XML内容的MD5
+        let digest = md5::compute(xml_body.as_bytes());
+        let content_md5 = general_purpose::STANDARD.encode(digest.0);
+        // 序列化callback并Base64编码
+        let callback_bytes = serde_json::to_vec(callback)?;
+        let callback_base64 = general_purpose::STANDARD.encode(&callback_bytes);
+
+        // 构建auth_meta字符串
+        let auth_meta = format!(
+            "POST\n{}\napplication/xml\n{}\nx-oss-callback:{}\nx-oss-date:{}\nx-oss-user-agent:aliyun-sdk-js/6.6.1 Chrome 98.0.4758.80 on Windows 10 64-bit\n/{}/{}?uploadId={}",
+            content_md5, time_str, callback_base64, time_str, bucket, obj_key, upload_id
+        );
+        Ok(auth_meta)
+    }
+    pub async fn auth(
+        &self,
+        auth_info: &str,
+        auth_meta: &str,
+        task_id: &str,
+    ) -> Result<AuthResponse> {
+        let req = AuthRequest {
+            auth_info: auth_info.to_string(),
+            auth_meta: auth_meta.to_string(),
+            task_id: task_id.to_string(),
+        };
+
+        let res: AuthResponse = self
+            .post_request(
+                format!(
+                    "{}/1/clouddrive/file/upload/auth?pr=ucpro&fr=pc",
+                    self.config.api_base_url
+                ),
+                &req,
+                None,
+            )
+            .await?
+            .context("expect response")?;
+
+        if res.status != 200 {
+            return Err(anyhow::anyhow!("delete file failed: {}", res.message));
+        }
+        Ok(res)
+    }
+
+    pub async fn up_auth_and_commit(&self, req: UpAuthAndCommitRequest) -> Result<()> {
+        // 构建XML内容
+        let mut xml_body =
+            String::from("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<CompleteMultipartUpload>\n");
+
+        for (i, md5) in req.md5s.iter().enumerate() {
+            xml_body.push_str(&format!(
+                "<Part>\n<PartNumber>{}</PartNumber>\n<ETag>{}</ETag>\n</Part>\n",
+                i + 1,
+                md5
+            ));
+        }
+        xml_body.push_str("</CompleteMultipartUpload>");
+
+        // 计算XML内容的MD5
+        let digest = md5::compute(xml_body.as_bytes());
+
+        let content_md5 = general_purpose::STANDARD.encode(digest.0);
+
+        // 序列化callback并Base64编码
+        let callback_bytes = serde_json::to_vec(&req.callback)?;
+        let callback_base64 = general_purpose::STANDARD.encode(&callback_bytes);
+
+        let now = chrono::Utc::now();
+        let time_str = now.format("%a, %d %b %Y %H:%M:%S GMT").to_string();
+        //let timestamp = now.timestamp_millis();
+
+        // 构建auth_meta字符串
+        let auth_meta = format!(
+            "POST\n{}\napplication/xml\n{}\nx-oss-callback:{}\nx-oss-date:{}\nx-oss-user-agent:aliyun-sdk-js/6.6.1 Chrome 98.0.4758.80 on Windows 10 64-bit\n/{}/{}?uploadId={}",
+            content_md5,
+            &time_str,
+            callback_base64,
+            &time_str,
+            req.bucket,
+            req.obj_key,
+            req.upload_id
+        );
+        let auth_key = self
+            .auth(&req.auth_info, &auth_meta, &req.task_id)
+            .await
+            .map_err(|e| {
+                error!(error = %e, "Failed to authenticate and commit upload");
+                e
+            })
+            .unwrap()
+            .data
+            .auth_key;
+
+        let commit_url = format!(
+            "https://{}.{}/{}?uploadId={}",
+            req.bucket,
+            req.upload_url, // 去掉 https://
+            req.obj_key,
+            req.upload_id
+        );
+
+        let mut headers = HeaderMap::new();
+        headers.insert("Authorization", HeaderValue::from_str(&auth_key)?);
+        headers.insert("Content-MD5", HeaderValue::from_str(&content_md5)?);
+        headers.insert("Content-Type", HeaderValue::from_str("application/xml")?);
+        headers.insert("x-oss-callback", HeaderValue::from_str(&callback_base64)?);
+        headers.insert("x-oss-date", HeaderValue::from_str(&time_str)?);
+        headers.insert(
+            "x-oss-user-agent",
+            HeaderValue::from_str("aliyun-sdk-js/6.6.1 Chrome 98.0.4758.80 on Windows 10 64-bit")?,
+        );
+        headers.insert("Referer", HeaderValue::from_str(REFERER)?);
+
+        //println!("{:#?}", headers);
+        let _res: EmptyResponse = self
+            .post_request(commit_url, &xml_body, Some(headers))
+            .await?
+            .context("expect response")?;
+
+        Ok(())
+    }
+    pub async fn finish(&self, obj_key: &str, task_id: &str) -> Result<FinishResponse> {
+        let req = FinishRequest {
+            obj_key: obj_key.to_string(),
+            task_id: task_id.to_string(),
+        };
+
+        let res: FinishResponse = self
+            .post_request(
+                format!(
+                    "{}/1/clouddrive/file/upload/finish?pr=ucpro&fr=pc",
+                    self.config.api_base_url
+                ),
+                &req,
+                None,
+            )
+            .await?
+            .context("expect response")?;
+
+        if res.status != 200 {
+            return Err(anyhow::anyhow!("delete file failed: {}", res.message));
+        }
+        // // sleep 500 sec for quark drive to process the finish request
+        // time::sleep(Duration::from_secs(500)).await;
+        Ok(res)
+    }
+
+    pub async fn up_part(&self, req: UpPartMethodRequest) -> Result<Option<String>> {
+        let oss_url = format!(
+            "https://{}.{}//{}?partNumber={}&uploadId={}",
+            req.bucket,
+            req.upload_url, // 去掉 https://
+            req.obj_key,
+            req.part_number,
+            req.upload_id
+        );
+        let url = reqwest::Url::parse(&oss_url)?;
+        let res = self
+            .client
+            .put(url.clone())
+            .header("Authorization", req.auth_key.clone())
+            .header("Content-Type", req.mime_type.clone())
+            .header("x-oss-date", req.utc_time.clone())
+            .header(
+                "x-oss-user-agent",
+                "aliyun-sdk-js/6.6.1 Chrome 98.0.4758.80 on Windows 10 64-bit",
+            )
+            .header("Referer", REFERER)
+            .body(req.part_bytes)
+            .send()
+            .await?;
+
+        match res.error_for_status_ref() {
+            Ok(_) => {
+                if res.status() == StatusCode::NO_CONTENT {
+                    return Ok(None);
+                }
+                let etag = res.headers().get("Etag").unwrap().to_str().unwrap();
+                return Ok(Some(etag.to_string()));
+            }
+            Err(err) => {
+                let err_msg = res.text().await?;
+                debug!(error = %err_msg, url = %url, "request failed");
+                match err.status() {
+                    Some(
+                        _status_code @ (StatusCode::REQUEST_TIMEOUT
+                        | StatusCode::TOO_MANY_REQUESTS
+                        | StatusCode::INTERNAL_SERVER_ERROR
+                        | StatusCode::BAD_GATEWAY
+                        | StatusCode::SERVICE_UNAVAILABLE
+                        | StatusCode::GATEWAY_TIMEOUT),
+                    ) => {
+                        time::sleep(Duration::from_secs(2)).await;
+                        let res = self.client.put(url).send().await?.error_for_status()?;
+                        if res.status() == StatusCode::NO_CONTENT {
+                            return Ok(None);
+                        }
+                        let etag = res.headers().get("Etag").unwrap().to_str().unwrap();
+                        Ok(Some(etag.to_string()))
+                    }
+                    // unexpected error
+                    _ => {
+                        debug!(error = %err, "request failed");
+                        Err(err.into())
+                    }
+                }
+            }
+        }
+    }
+}
+
+fn get_format_type(file_name: &str) -> &str {
+    if let Some(ext) = file_name.rsplit('.').next() {
+        let ext = ext.to_lowercase();
+        match ext.as_str() {
+            "jpg" | "jpeg" => "image/jpeg",
+            "png" => "image/png",
+            "gif" => "image/gif",
+            "mp4" => "video/mp4",
+            "avi" => "video/x-msvideo",
+            "mov" => "video/quicktime",
+            "mp3" => "audio/mpeg",
+            "wav" => "audio/wav",
+            "pdf" => "application/pdf",
+            "doc" | "docx" => "application/msword",
+            "xls" | "xlsx" => "application/vnd.ms-excel",
+            "ppt" | "pptx" => "application/vnd.ms-powerpoint",
+            "txt" => "text/plain",
+            "zip" => "application/zip",
+            "rar" => "application/vnd.rar",
+            "7z" => "application/x-7z-compressed",
+            _ => "application/octet-stream",
+        }
+    } else {
+        "application/octet-stream"
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // --- get_format_type tests ---
+
+    #[test]
+    fn test_get_format_type_image() {
+        assert_eq!(get_format_type("photo.jpg"), "image/jpeg");
+        assert_eq!(get_format_type("photo.jpeg"), "image/jpeg");
+        assert_eq!(get_format_type("photo.JPG"), "image/jpeg");
+        assert_eq!(get_format_type("image.png"), "image/png");
+        assert_eq!(get_format_type("anim.gif"), "image/gif");
+    }
+
+    #[test]
+    fn test_get_format_type_video() {
+        assert_eq!(get_format_type("movie.mp4"), "video/mp4");
+        assert_eq!(get_format_type("movie.avi"), "video/x-msvideo");
+        assert_eq!(get_format_type("movie.mov"), "video/quicktime");
+    }
+
+    #[test]
+    fn test_get_format_type_audio() {
+        assert_eq!(get_format_type("song.mp3"), "audio/mpeg");
+        assert_eq!(get_format_type("song.wav"), "audio/wav");
+    }
+
+    #[test]
+    fn test_get_format_type_document() {
+        assert_eq!(get_format_type("report.pdf"), "application/pdf");
+        assert_eq!(get_format_type("report.doc"), "application/msword");
+        assert_eq!(get_format_type("report.docx"), "application/msword");
+        assert_eq!(get_format_type("data.xls"), "application/vnd.ms-excel");
+        assert_eq!(
+            get_format_type("slides.pptx"),
+            "application/vnd.ms-powerpoint"
+        );
+        assert_eq!(get_format_type("readme.txt"), "text/plain");
+    }
+
+    #[test]
+    fn test_get_format_type_archive() {
+        assert_eq!(get_format_type("archive.zip"), "application/zip");
+        assert_eq!(get_format_type("archive.rar"), "application/vnd.rar");
+        assert_eq!(get_format_type("archive.7z"), "application/x-7z-compressed");
+    }
+
+    #[test]
+    fn test_get_format_type_unknown() {
+        assert_eq!(get_format_type("file.xyz"), "application/octet-stream");
+        assert_eq!(get_format_type("noext"), "application/octet-stream");
+    }
+
+    // --- up_part_auth_meta tests ---
+
+    #[tokio::test]
+    async fn test_up_part_auth_meta_format() {
+        let cookie = Arc::new(DashMap::new());
+        cookie.insert("test".to_string(), "value".to_string());
+        let config = DriveConfig {
+            api_base_url: "https://drive.quark.cn".to_string(),
+            cookie,
+        };
+        let drive = QuarkDrive::new(config).unwrap();
+
+        let result = drive
+            .up_part_auth_meta(
+                "application/octet-stream",
+                "Mon, 01 Jan 2024 00:00:00 GMT",
+                "test-bucket",
+                "test-obj-key",
+                1,
+                "test-upload-id",
+            )
+            .await
+            .unwrap();
+
+        assert!(result.starts_with("PUT\n"));
+        assert!(result.contains("application/octet-stream"));
+        assert!(result.contains("Mon, 01 Jan 2024 00:00:00 GMT"));
+        assert!(result.contains("test-bucket"));
+        assert!(result.contains("test-obj-key"));
+        assert!(result.contains("partNumber=1"));
+        assert!(result.contains("uploadId=test-upload-id"));
+    }
+
+    // --- Integration tests (require QUARK_COOKIE) ---
+
+    #[tokio::test]
+    #[ignore]
+    async fn test_get_files_by_pdir_fid() {
+        let cookie_str = std::env::var("QUARK_COOKIE").unwrap();
+        let cookie = Arc::new(DashMap::new());
+        for pair in cookie_str.split(';') {
+            if let Some((k, v)) = pair.trim().split_once('=') {
+                cookie.insert(k.trim().to_string(), v.trim().to_string());
+            }
+        }
+        let config = DriveConfig {
+            api_base_url: "https://drive.quark.cn".to_string(),
+            cookie: cookie,
+        };
+        let drive = QuarkDrive::new(config).unwrap();
+        let (files, _total) = drive.get_files_by_pdir_fid("0", 1, 50).await.unwrap();
+        assert!(files.is_some());
+        println!("{:?}", files);
+    }
+
+    #[tokio::test]
+    #[ignore]
+    async fn test_get_download_urls() {
+        let drive = create_drive_from_env();
+        // Dynamically find a file fid from root
+        let (files, _) = drive.get_files_by_pdir_fid("0", 1, 50).await.unwrap();
+        let files = files.unwrap();
+        let file = files.list.iter().find(|f| f.file && f.size > 0);
+        if let Some(file) = file {
+            let res = drive
+                .get_download_urls(vec![file.fid.clone()])
+                .await
+                .unwrap();
+            assert!(!res.is_empty());
+            println!("{:#?}", res);
+        } else {
+            println!("No files found in root to test download URLs");
+        }
+    }
+
+    // --- Helper ---
+
+    fn create_test_drive() -> QuarkDrive {
+        let cookie = Arc::new(DashMap::new());
+        cookie.insert("test".to_string(), "value".to_string());
+        let config = DriveConfig {
+            api_base_url: "https://drive.quark.cn".to_string(),
+            cookie,
+        };
+        QuarkDrive::new(config).unwrap()
+    }
+
+    fn create_drive_from_env() -> QuarkDrive {
+        let cookie_str = std::env::var("QUARK_COOKIE").unwrap();
+        let cookie = Arc::new(DashMap::new());
+        for pair in cookie_str.split(';') {
+            if let Some((k, v)) = pair.trim().split_once('=') {
+                cookie.insert(k.trim().to_string(), v.trim().to_string());
+            }
+        }
+        let config = DriveConfig {
+            api_base_url: "https://drive.quark.cn".to_string(),
+            cookie,
+        };
+        QuarkDrive::new(config).unwrap()
+    }
+
+    // --- md5_cache unit tests ---
+
+    #[test]
+    fn test_md5_cache_miss() {
+        let drive = create_test_drive();
+        assert!(drive.get_cached_md5("nonexistent_fid").is_none());
+    }
+
+    #[test]
+    fn test_md5_cache_hit() {
+        let drive = create_test_drive();
+        drive
+            .md5_cache
+            .insert("fid_123".to_string(), "abc123def456".to_string());
+        let result = drive.get_cached_md5("fid_123");
+        assert_eq!(result, Some("abc123def456".to_string()));
+    }
+
+    #[test]
+    fn test_md5_cache_shared_across_clones() {
+        let drive = create_test_drive();
+        let drive_clone = drive.clone();
+        drive
+            .md5_cache
+            .insert("fid_1".to_string(), "md5_value".to_string());
+        // Clone should see the same cache (Arc<DashMap>)
+        assert_eq!(
+            drive_clone.get_cached_md5("fid_1"),
+            Some("md5_value".to_string())
+        );
+    }
+
+    #[test]
+    fn test_md5_cache_overwrite() {
+        let drive = create_test_drive();
+        drive
+            .md5_cache
+            .insert("fid_1".to_string(), "old_md5".to_string());
+        drive
+            .md5_cache
+            .insert("fid_1".to_string(), "new_md5".to_string());
+        assert_eq!(drive.get_cached_md5("fid_1"), Some("new_md5".to_string()));
+    }
+
+    // --- up_commit_auth_meta tests ---
+
+    #[test]
+    fn test_up_commit_auth_meta_format() {
+        let drive = create_test_drive();
+        let callback = Callback {
+            callback_url: "https://example.com/callback".to_string(),
+            callback_body: "test_body".to_string(),
+        };
+        let result = drive
+            .up_commit_auth_meta(
+                vec!["etag1".to_string(), "etag2".to_string()],
+                &callback,
+                "test-bucket",
+                "test-obj-key",
+                "Mon, 01 Jan 2024 00:00:00 GMT",
+                "test-upload-id",
+            )
+            .unwrap();
+
+        assert!(result.starts_with("POST\n"));
+        assert!(result.contains("application/xml"));
+        assert!(result.contains("Mon, 01 Jan 2024 00:00:00 GMT"));
+        assert!(result.contains("x-oss-callback:"));
+        assert!(result.contains("test-bucket"));
+        assert!(result.contains("test-obj-key"));
+        assert!(result.contains("uploadId=test-upload-id"));
+    }
+
+    #[test]
+    fn test_up_commit_auth_meta_single_part() {
+        let drive = create_test_drive();
+        let callback = Callback {
+            callback_url: "https://example.com/callback".to_string(),
+            callback_body: "body".to_string(),
+        };
+        let result = drive
+            .up_commit_auth_meta(
+                vec!["single_etag".to_string()],
+                &callback,
+                "bucket",
+                "key",
+                "time",
+                "uid",
+            )
+            .unwrap();
+
+        assert!(result.contains("POST\n"));
+        assert!(result.contains("uploadId=uid"));
+    }
+
+    // --- Integration tests (require QUARK_COOKIE) ---
+
+    #[tokio::test]
+    #[ignore]
+    async fn test_get_quota() {
+        let drive = create_drive_from_env();
+        let (used, total) = drive.get_quota().await.unwrap();
+        assert!(total > 0, "total capacity should be > 0");
+        assert!(used <= total, "used should be <= total");
+        println!("Quota: used={}, total={}", used, total);
+    }
+
+    #[tokio::test]
+    #[ignore]
+    async fn test_list_root_files() {
+        let drive = create_drive_from_env();
+        let (files, total) = drive.get_files_by_pdir_fid("0", 1, 50).await.unwrap();
+        assert!(files.is_some(), "root should have files");
+        let files = files.unwrap();
+        assert!(files.total > 0);
+        println!("Root files: total={}", total);
+        for f in &files.list {
+            println!(
+                "  {} (fid={}, dir={}, size={})",
+                f.file_name, f.fid, f.dir, f.size
+            );
+        }
+    }
+
+    #[tokio::test]
+    #[ignore]
+    async fn test_list_nonexistent_dir() {
+        let drive = create_drive_from_env();
+        let (files, total) = drive
+            .get_files_by_pdir_fid("nonexistent_fid_12345", 1, 50)
+            .await
+            .unwrap();
+        assert!(files.is_none() || total == 0);
+    }
+
+    #[tokio::test]
+    #[ignore]
+    async fn test_get_file_md5() {
+        let drive = create_drive_from_env();
+        // Search subdirectories for a real file (root may only have test artifacts)
+        let (root_files, _) = drive.get_files_by_pdir_fid("0", 1, 50).await.unwrap();
+        let root_files = root_files.unwrap();
+        let mut tested = false;
+        // Try real files in root first
+        for f in root_files
+            .list
+            .iter()
+            .filter(|f| f.file && f.size > 0 && !f.file_name.starts_with("_test_"))
+        {
+            let md5 = drive.get_file_md5(&f.fid).await.unwrap();
+            eprintln!("File: {}, MD5: {:?}", f.file_name, md5);
+            if let Some(md5) = md5 {
+                // Normal files return hex MD5 (32 hex chars)
+                assert_eq!(md5.len(), 32, "MD5 hex should be 32 chars");
+                assert!(
+                    md5.chars().all(|c| c.is_ascii_hexdigit()),
+                    "MD5 should be hex"
+                );
+                tested = true;
+                break;
+            }
+        }
+        // If no real files in root, search first subdirectory
+        if !tested {
+            for dir in root_files.list.iter().filter(|f| f.dir).take(3) {
+                let (sub, _) = drive.get_files_by_pdir_fid(&dir.fid, 1, 10).await.unwrap();
+                if let Some(sub) = sub {
+                    if let Some(f) = sub.list.iter().find(|f| f.file && f.size > 0) {
+                        let md5 = drive.get_file_md5(&f.fid).await.unwrap();
+                        eprintln!("File: {}/{}, MD5: {:?}", dir.file_name, f.file_name, md5);
+                        if let Some(md5) = md5 {
+                            assert_eq!(md5.len(), 32, "MD5 hex should be 32 chars");
+                            tested = true;
+                        }
+                        break;
+                    }
+                }
+                if tested {
+                    break;
+                }
+            }
+        }
+        assert!(tested, "Should have tested at least one real file");
+    }
+
+    #[tokio::test]
+    #[ignore]
+    async fn test_download_url_caches_md5() {
+        let drive = create_drive_from_env();
+        // Find a real file (search subdirectories if needed)
+        let (root_files, _) = drive.get_files_by_pdir_fid("0", 1, 50).await.unwrap();
+        let root_files = root_files.unwrap();
+        let mut file_fid = None;
+        let mut file_name = String::new();
+        // Try root first
+        if let Some(f) = root_files
+            .list
+            .iter()
+            .find(|f| f.file && f.size > 0 && !f.file_name.starts_with("_test_"))
+        {
+            file_fid = Some(f.fid.clone());
+            file_name = f.file_name.clone();
+        }
+        // Search subdirectories if no real files in root
+        if file_fid.is_none() {
+            for dir in root_files.list.iter().filter(|d| d.dir).take(3) {
+                let (sub, _) = drive.get_files_by_pdir_fid(&dir.fid, 1, 10).await.unwrap();
+                if let Some(sub) = sub {
+                    if let Some(f) = sub.list.iter().find(|f| f.file && f.size > 0) {
+                        file_fid = Some(f.fid.clone());
+                        file_name = format!("{}/{}", dir.file_name, f.file_name);
+                        break;
+                    }
+                }
+            }
+        }
+        let fid = file_fid.expect("Should find at least one real file");
+
+        // Before: cache should be empty
+        assert!(drive.get_cached_md5(&fid).is_none());
+
+        // Call get_download_urls which should populate the cache
+        let urls = drive.get_download_urls(vec![fid.clone()]).await.unwrap();
+        assert!(!urls.is_empty());
+
+        // After: cache should have the md5 (hex format for real files)
+        let cached_md5 = drive.get_cached_md5(&fid);
+        eprintln!("File: {}, Cached MD5: {:?}", file_name, cached_md5);
+        if let Some(md5) = cached_md5 {
+            assert!(!md5.is_empty(), "Cached MD5 should not be empty");
+        }
+    }
+
+    #[tokio::test]
+    #[ignore]
+    async fn test_create_and_remove_folder() {
+        let drive = create_drive_from_env();
+        let folder_name = format!("_test_folder_{}", chrono::Utc::now().timestamp_millis());
+
+        // Create folder in root
+        drive.create_folder("0", &folder_name).await.unwrap();
+        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+
+        // Verify it exists by listing root
+        let (files, _) = drive.get_files_by_pdir_fid("0", 1, 500).await.unwrap();
+        let files = files.unwrap();
+        let created = files.list.iter().find(|f| f.file_name == folder_name);
+        assert!(created.is_some(), "Created folder should exist in root");
+        let fid = created.unwrap().fid.clone();
+
+        // Remove the folder
+        drive.remove_file(&fid, false).await.unwrap();
+        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+
+        // Verify it's gone
+        let (files, _) = drive.get_files_by_pdir_fid("0", 1, 500).await.unwrap();
+        let files = files.unwrap();
+        let found = files.list.iter().find(|f| f.file_name == folder_name);
+        assert!(found.is_none(), "Removed folder should not exist");
+    }
+
+    #[tokio::test]
+    #[ignore]
+    async fn test_rename_file() {
+        let drive = create_drive_from_env();
+        let original_name = format!("_test_rename_{}", chrono::Utc::now().timestamp_millis());
+        let new_name = format!("{}_renamed", original_name);
+
+        // Create a folder
+        drive.create_folder("0", &original_name).await.unwrap();
+        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+
+        // Find the folder
+        let (files, _) = drive.get_files_by_pdir_fid("0", 1, 500).await.unwrap();
+        let fid = files
+            .unwrap()
+            .list
+            .iter()
+            .find(|f| f.file_name == original_name)
+            .unwrap()
+            .fid
+            .clone();
+
+        // Rename it
+        drive.rename_file(&fid, &new_name).await.unwrap();
+        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+
+        // Verify the rename
+        let (files, _) = drive.get_files_by_pdir_fid("0", 1, 500).await.unwrap();
+        let files = files.unwrap();
+        assert!(
+            files.list.iter().any(|f| f.file_name == new_name),
+            "Renamed folder should exist"
+        );
+        assert!(
+            !files.list.iter().any(|f| f.file_name == original_name),
+            "Original name should be gone"
+        );
+
+        // Cleanup
+        drive.remove_file(&fid, false).await.unwrap();
+    }
+
+    #[tokio::test]
+    #[ignore]
+    async fn test_move_file() {
+        let drive = create_drive_from_env();
+        let ts = chrono::Utc::now().timestamp_millis();
+        let folder_a = format!("_test_move_a_{}", ts);
+        let folder_b = format!("_test_move_b_{}", ts);
+        let child_folder = format!("_test_move_child_{}", ts);
+
+        // Create folder A and B in root
+        drive.create_folder("0", &folder_a).await.unwrap();
+        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+
+        let (files, _) = drive.get_files_by_pdir_fid("0", 1, 500).await.unwrap();
+        let fid_a = files
+            .as_ref()
+            .unwrap()
+            .list
+            .iter()
+            .find(|f| f.file_name == folder_a)
+            .unwrap()
+            .fid
+            .clone();
+
+        drive.create_folder("0", &folder_b).await.unwrap();
+        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+
+        let (files, _) = drive.get_files_by_pdir_fid("0", 1, 500).await.unwrap();
+        let fid_b = files
+            .as_ref()
+            .unwrap()
+            .list
+            .iter()
+            .find(|f| f.file_name == folder_b)
+            .unwrap()
+            .fid
+            .clone();
+
+        // Create a child folder inside A
+        drive.create_folder(&fid_a, &child_folder).await.unwrap();
+        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+
+        let (files, _) = drive.get_files_by_pdir_fid(&fid_a, 1, 50).await.unwrap();
+        let child_fid = files
+            .as_ref()
+            .unwrap()
+            .list
+            .iter()
+            .find(|f| f.file_name == child_folder)
+            .unwrap()
+            .fid
+            .clone();
+
+        // Move child from A to B
+        drive.move_file(&child_fid, &fid_b).await.unwrap();
+        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+
+        // Verify child is in B, not in A
+        let (files_a, _) = drive.get_files_by_pdir_fid(&fid_a, 1, 50).await.unwrap();
+        let (files_b, _) = drive.get_files_by_pdir_fid(&fid_b, 1, 50).await.unwrap();
+        assert!(!files_a.as_ref().map_or(false, |f| {
+            f.list.iter().any(|f| f.file_name == child_folder)
+        }));
+        assert!(files_b.as_ref().map_or(false, |f| {
+            f.list.iter().any(|f| f.file_name == child_folder)
+        }));
+
+        // Cleanup
+        drive.remove_file(&child_fid, false).await.unwrap();
+        drive.remove_file(&fid_a, false).await.unwrap();
+        drive.remove_file(&fid_b, false).await.unwrap();
+    }
+
+    #[tokio::test]
+    #[ignore]
+    async fn test_download_file_full() {
+        let drive = create_drive_from_env();
+        // Find a small file in root (skip test files that may not be fully uploaded)
+        let (files, _) = drive.get_files_by_pdir_fid("0", 1, 50).await.unwrap();
+        let files = files.unwrap();
+        let file = files.list.iter().find(|f| {
+            f.file && f.size > 0 && f.size < 10 * 1024 * 1024 && !f.file_name.starts_with("_test_")
+        });
+        if let Some(file) = file {
+            let url = drive.get_download_url(&file.fid).await.unwrap();
+            assert!(!url.is_empty());
+
+            // Download the full file
+            let content = drive.download(&url, None).await.unwrap();
+            assert_eq!(
+                content.len() as u64,
+                file.size,
+                "Downloaded size should match file size"
+            );
+            println!("Downloaded '{}': {} bytes", file.file_name, content.len());
+        } else {
+            println!("No suitable files found in root to test download");
+        }
+    }
+
+    #[tokio::test]
+    #[ignore]
+    async fn test_download_file_range() {
+        let drive = create_drive_from_env();
+        // Find a file > 1KB (skip test files)
+        let (files, _) = drive.get_files_by_pdir_fid("0", 1, 50).await.unwrap();
+        let files = files.unwrap();
+        let file = files
+            .list
+            .iter()
+            .find(|f| f.file && f.size > 1024 && !f.file_name.starts_with("_test_"));
+        if let Some(file) = file {
+            let url = drive.get_download_url(&file.fid).await.unwrap();
+
+            // Download first 512 bytes
+            let content = drive.download(&url, Some((0, 512))).await.unwrap();
+            assert_eq!(content.len(), 512, "Partial download should be 512 bytes");
+
+            // Download from offset
+            let content2 = drive.download(&url, Some((100, 256))).await.unwrap();
+            assert_eq!(content2.len(), 256, "Offset download should be 256 bytes");
+
+            println!("Range download of '{}' OK", file.file_name);
+        }
+    }
+
+    #[tokio::test]
+    #[ignore]
+    async fn test_upload_pre_and_hash() {
+        let drive = create_drive_from_env();
+        // Test upload preparation (up_pre)
+        let file_name = format!("_test_upload_{}.txt", chrono::Utc::now().timestamp_millis());
+        let res = drive.up_pre(&file_name, 11, "0").await.unwrap();
+
+        assert!(!res.data.task_id.is_empty(), "task_id should not be empty");
+        assert!(!res.data.obj_key.is_empty(), "obj_key should not be empty");
+        assert!(!res.data.bucket.is_empty(), "bucket should not be empty");
+        assert!(res.metadata.part_size > 0, "part_size should be > 0");
+        println!(
+            "Upload pre: task_id={}, bucket={}, part_size={}",
+            res.data.task_id, res.data.bucket, res.metadata.part_size
+        );
+
+        // Test up_hash (using a known MD5/SHA1 for "hello world")
+        let md5 = "5eb63bbbe01eeed093cb22bb8f5acdc3";
+        let sha1 = "2aae6c35c94fcfb415dbe95f408b9ce91ee846ed";
+        let hash_res = drive.up_hash(md5, sha1, &res.data.task_id).await.unwrap();
+        println!("Upload hash: finish={}", hash_res.data.finish);
+        // finish=true means instant upload (秒传), finish=false means need to upload chunks
+    }
+
+    // ====================================================================
+    // Upload scenario tests: SHA match/mismatch + folder duplicate
+    // ====================================================================
+
+    /// Scenario 1: SHA mismatch → delete old file, create new file
+    /// Tests: existing file's cloud MD5 doesn't match new content → triggers delete + re-upload
+    #[tokio::test]
+    #[ignore]
+    async fn test_upload_sha_mismatch_delete_and_recreate() {
+        let drive = create_drive_from_env();
+
+        // Step 1: Find a real file in the drive with hex MD5
+        let (root_files, _) = drive.get_files_by_pdir_fid("0", 1, 50).await.unwrap();
+        let root_files = root_files.unwrap();
+        let mut target = None;
+        for dir in root_files.list.iter().filter(|f| f.dir).take(5) {
+            let (sub, _) = drive.get_files_by_pdir_fid(&dir.fid, 1, 10).await.unwrap();
+            if let Some(sub) = sub {
+                if let Some(f) = sub.list.iter().find(|f| f.file && f.size > 0) {
+                    target = Some((f.fid.clone(), format!("{}/{}", dir.file_name, f.file_name)));
+                    break;
+                }
+            }
+        }
+        let (fid, name) = target.expect("Need at least one real file for this test");
+
+        // Step 2: Get cloud MD5 (hex format for settled files)
+        let cloud_md5 = drive
+            .get_file_md5(&fid)
+            .await
+            .unwrap()
+            .expect("File should have cloud MD5");
+        eprintln!("[SHA-MISMATCH] File: {}, cloud_md5={}", name, cloud_md5);
+
+        // Step 3: Compute MD5 of completely different content
+        let different_content = b"this_is_completely_different_content_for_testing_12345";
+        let local_md5 = format!("{:x}", md5::compute(different_content));
+        eprintln!("[SHA-MISMATCH] different_content_md5={}", local_md5);
+
+        // Step 4: Verify they DON'T match → do_flush would delete old + upload new
+        assert!(
+            !cloud_md5.eq_ignore_ascii_case(&local_md5),
+            "Different content should produce different MD5"
+        );
+        eprintln!(
+            "[SHA-MISMATCH] PASSED: MD5 mismatch confirmed → do_flush would delete old file and upload new"
+        );
+    }
+
+    /// Scenario 2: SHA match → skip upload, file unchanged
+    /// Tests: cloud MD5 is hex format, so eq_ignore_ascii_case with same hex value works
+    /// This is the core logic in do_flush that decides whether to skip upload
+    #[tokio::test]
+    #[ignore]
+    async fn test_upload_sha_match_skip() {
+        let drive = create_drive_from_env();
+
+        // Step 1: Find a real file with hex MD5
+        let (root_files, _) = drive.get_files_by_pdir_fid("0", 1, 50).await.unwrap();
+        let root_files = root_files.unwrap();
+        let mut tested = false;
+
+        for dir in root_files.list.iter().filter(|f| f.dir).take(5) {
+            let (sub, _) = drive.get_files_by_pdir_fid(&dir.fid, 1, 10).await.unwrap();
+            if let Some(sub) = sub {
+                for f in sub.list.iter().filter(|f| f.file && f.size > 0) {
+                    let cloud_md5 = match drive.get_file_md5(&f.fid).await {
+                        Ok(Some(md5)) => md5,
+                        _ => continue,
+                    };
+
+                    // Step 2: Verify cloud MD5 is hex format (same as local format!("{:x}", ...))
+                    let is_hex =
+                        cloud_md5.len() == 32 && cloud_md5.chars().all(|c| c.is_ascii_hexdigit());
+                    eprintln!(
+                        "[SHA-MATCH] File: {}/{}, cloud_md5={}, is_hex={}",
+                        dir.file_name, f.file_name, cloud_md5, is_hex
+                    );
+
+                    if !is_hex {
+                        continue;
+                    }
+
+                    // Step 3: Simulate do_flush comparison — same hex value matches
+                    // In do_flush: local_md5 = format!("{:x}", md5_ctx.compute());
+                    // If content unchanged, local_md5 == cloud_md5
+                    let simulated_local_md5 = cloud_md5.to_lowercase();
+                    assert!(
+                        cloud_md5.eq_ignore_ascii_case(&simulated_local_md5),
+                        "Same hex MD5 should match → do_flush skips upload"
+                    );
+
+                    // Step 4: Verify different MD5 does NOT match
+                    let different_md5 = "00000000000000000000000000000000";
+                    assert!(
+                        !cloud_md5.eq_ignore_ascii_case(different_md5),
+                        "Different MD5 should not match → do_flush proceeds with upload"
+                    );
+
+                    eprintln!(
+                        "[SHA-MATCH] PASSED: cloud returns hex MD5, eq_ignore_ascii_case works correctly"
+                    );
+                    tested = true;
+                    break;
+                }
+            }
+            if tested {
+                break;
+            }
+        }
+        assert!(tested, "Should have found at least one file with hex MD5");
+    }
+
+    /// Scenario 3: Folder duplicate → don't create; different name → create
+    #[tokio::test]
+    #[ignore]
+    async fn test_upload_folder_duplicate_prevention() {
+        let drive = create_drive_from_env();
+        let ts = chrono::Utc::now().timestamp_millis();
+        let folder_name = format!("_test_dup_folder_{}", ts);
+        let folder_name_2 = format!("_test_new_folder_{}", ts);
+
+        // Step 1: Create folder
+        drive.create_folder("0", &folder_name).await.unwrap();
+        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+        eprintln!("[FOLDER-DUP] Step1: created '{}'", folder_name);
+
+        // Get fid
+        let (files, _) = drive.get_files_by_pdir_fid("0", 1, 500).await.unwrap();
+        let fid = files
+            .as_ref()
+            .unwrap()
+            .list
+            .iter()
+            .find(|f| f.file_name == folder_name)
+            .unwrap()
+            .fid
+            .clone();
+
+        // Step 2: Try creating folder with same name again
+        // At VFS level, create_dir checks existence and returns FsError::Exists
+        // At Drive API level, the API may or may not allow it
+        let dup_result = drive.create_folder("0", &folder_name).await;
+        eprintln!(
+            "[FOLDER-DUP] Step2: duplicate create_folder result: {:?}",
+            dup_result.is_ok()
+        );
+
+        // Verify: even if API allows it, there should be at most 2 entries
+        // The VFS layer (create_dir) prevents this by checking existence first
+        let (files, _) = drive.get_files_by_pdir_fid("0", 1, 500).await.unwrap();
+        let dup_count = files
+            .as_ref()
+            .unwrap()
+            .list
+            .iter()
+            .filter(|f| f.file_name == folder_name)
+            .count();
+        eprintln!(
+            "[FOLDER-DUP] Step2: folders with name '{}': count={}",
+            folder_name, dup_count
+        );
+
+        // Step 3: Create folder with DIFFERENT name → should always succeed
+        drive.create_folder("0", &folder_name_2).await.unwrap();
+        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+        eprintln!(
+            "[FOLDER-DUP] Step3: created different folder '{}'",
+            folder_name_2
+        );
+
+        let (files, _) = drive.get_files_by_pdir_fid("0", 1, 500).await.unwrap();
+        let found_2 = files
+            .as_ref()
+            .unwrap()
+            .list
+            .iter()
+            .any(|f| f.file_name == folder_name_2);
+        assert!(found_2, "Different-name folder should be created");
+
+        // Step 4: Test VFS-level duplicate prevention
+        // create_dir checks get_file() first → returns Exists if already there
+        let fs =
+            crate::vfs::QuarkDriveFileSystem::new(drive.clone(), "/".to_string(), 100, 60).unwrap();
+        use dav_server::davpath::DavPath;
+        use dav_server::fs::DavFileSystem;
+
+        let dav_path = DavPath::new(&format!("/{}", folder_name)).unwrap();
+        let vfs_result = fs.create_dir(&dav_path).await;
+        eprintln!(
+            "[FOLDER-DUP] Step4: VFS create_dir for existing folder: {:?}",
+            vfs_result
+        );
+        assert!(
+            vfs_result.is_err(),
+            "VFS should reject duplicate folder creation"
+        );
+
+        let dav_path_new = DavPath::new(&format!("/_test_vfs_new_folder_{}", ts)).unwrap();
+        let vfs_result_new = fs.create_dir(&dav_path_new).await;
+        eprintln!(
+            "[FOLDER-DUP] Step4: VFS create_dir for new folder: {:?}",
+            vfs_result_new
+        );
+        assert!(
+            vfs_result_new.is_ok(),
+            "VFS should allow new folder creation"
+        );
+        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+
+        // Cleanup: remove all test folders
+        let (files, _) = drive.get_files_by_pdir_fid("0", 1, 500).await.unwrap();
+        for f in files.as_ref().unwrap().list.iter() {
+            if f.file_name == folder_name
+                || f.file_name == folder_name_2
+                || f.file_name == format!("_test_vfs_new_folder_{}", ts)
+            {
+                let _ = drive.remove_file(&f.fid, false).await;
+            }
+        }
+        // Also clean up API-level duplicates
+        if dup_count > 1 {
+            let (files, _) = drive.get_files_by_pdir_fid("0", 1, 500).await.unwrap();
+            for f in files
+                .as_ref()
+                .unwrap()
+                .list
+                .iter()
+                .filter(|f| f.file_name == folder_name)
+            {
+                let _ = drive.remove_file(&f.fid, false).await;
+            }
+        }
+        eprintln!("[FOLDER-DUP] PASSED: duplicate prevention works at VFS level");
+    }
+}

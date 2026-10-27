@@ -1,0 +1,107 @@
+name: Build binary package
+
+on:
+  workflow_dispatch:
+    inputs:
+      release_body:
+        description: 'Release 描述（可选）'
+        required: false
+        default: ''
+  # push:
+  #   tags:
+  #     - '*'
+
+jobs:
+  build:
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+          - os: ubuntu-latest
+            target: aarch64-unknown-linux-gnu
+          - os: macos-latest
+            target: x86_64-apple-darwin
+          - os: macos-latest
+            target: aarch64-apple-darwin
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+          - os: windows-latest
+            target: aarch64-pc-windows-msvc
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.ref_name }}
+
+      - name: Install Rust
+        uses: actions-rs/toolchain@v1
+        with:
+          toolchain: stable
+          target: ${{ matrix.target }}
+
+      - name: Install OpenSSL (x86_64-unknown-linux-gnu)
+        if: matrix.target == 'x86_64-unknown-linux-gnu'
+        run: sudo apt-get update && sudo apt-get install -y pkg-config libssl-dev
+
+      - name: Install cross
+        if: matrix.os != 'windows-latest'
+        run: cargo install cross
+
+      - name: Add macOS target
+        if: contains(matrix.target, 'apple-darwin')
+        run: rustup target add ${{ matrix.target }}
+
+      - name: Build (cross for Linux, cargo for others)
+        if: matrix.os != 'windows-latest'
+        run: |
+          if [[ "${{ matrix.target }}" == *"linux-gnu"* ]]; then
+            cross build --release --target ${{ matrix.target }}
+          else
+            cargo build --release --target ${{ matrix.target }}
+          fi
+
+      - name: Build (Windows)
+        if: matrix.os == 'windows-latest'
+        run: cargo build --release --target ${{ matrix.target }}
+
+      # - name: Build
+      #   if: matrix.target != 'aarch64-unknown-linux-gnu'
+      #   run: cargo build --release --target ${{ matrix.target }}
+
+      - name: Package (Unix)
+        if: matrix.os != 'windows-latest'
+        run: |
+          mkdir dist
+          cp target/${{ matrix.target }}/release/quarkdrive-webdav* dist/
+          cd dist
+          tar czf ../quarkdrive-webdav-${{ matrix.target }}.tar.gz *
+
+      - name: Package (Windows)
+        if: matrix.os == 'windows-latest'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path dist
+          Copy-Item "target/${{ matrix.target }}/release/quarkdrive-webdav.exe" -Destination dist/
+          Compress-Archive -Path dist/* -DestinationPath "quarkdrive-webdav-${{ matrix.target }}.zip"
+
+      - name: Upload Release Asset
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            quarkdrive-webdav-${{ matrix.target }}.*
+          body: ${{ github.event.inputs.release_body }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: 设置 Release 名称
+        if: matrix.os != 'windows-latest'
+        id: release_vars
+        run: |
+          echo "name=${{ github.ref_name }}" >> $GITHUB_OUTPUT
+
+      # 你可以在后续创建 Release 的步骤中使用 ${{ steps.release_vars.outputs.name }} 作为 release 名称
+      # ${{ github.event.inputs.release_body }} 可作为 release 描述

@@ -1,0 +1,1474 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>管理平台</title>
+<style>
+:root {
+  --ink: #14221e;
+  --muted: #5f6f69;
+  --line: #e4ebe7;
+  --paper: #f4f7f5;
+  --card: #fff;
+  --accent: #0f6e56;
+  --accent-dark: #0b5644;
+  --danger: #b42318;
+  --ok: #067647;
+  --shadow: 0 16px 40px rgba(20, 34, 30, 0.08);
+}
+* { margin: 0; padding: 0; box-sizing: border-box; }
+html, body { height: 100%; }
+body { font-family: "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif; background: var(--paper); color: var(--ink); line-height: 1.5; }
+button, input, select, textarea { font: inherit; }
+button, .picker { min-height: 40px; }
+.gate { min-height: 100%; display: grid; place-items: center; padding: 32px 16px; background: linear-gradient(180deg, #e7f3ee 0%, var(--paper) 280px); }
+.gate-card { width: min(440px, 100%); background: var(--card); border: 1px solid var(--line); border-radius: 18px; box-shadow: var(--shadow); padding: 32px 28px 28px; }
+.eyebrow { color: var(--accent); font-size: 12px; font-weight: 800; letter-spacing: 0.14em; text-transform: uppercase; }
+.gate-card h1 { margin: 8px 0 6px; font-size: 28px; letter-spacing: -0.03em; }
+.shell { height: 100%; min-height: 100%; display: flex; overflow: hidden; }
+.side { width: 240px; flex: none; background: #10211c; color: #d7e4de; display: flex; flex-direction: column; padding: 20px 12px 16px; }
+.brand { padding: 4px 12px 20px; }
+.brand strong { display: block; color: #fff; font-size: 16px; }
+.brand span { display: block; margin-top: 4px; color: #8ea399; font-size: 12px; }
+.menu { display: flex; flex-direction: column; gap: 4px; }
+.menu button { text-align: left; border: 0; background: transparent; color: #d7e4de; border-radius: 10px; padding: 10px 12px; cursor: pointer; font-weight: 700; }
+.menu button:hover { background: rgba(255,255,255,0.06); color: #fff; }
+.menu button.active { background: var(--accent); color: #fff; }
+.side-foot { margin-top: auto; display: flex; flex-direction: column; gap: 10px; padding: 12px; }
+.side-foot a, .side-foot button { color: #8ea399; background: none; border: 0; padding: 0; text-align: left; cursor: pointer; font-size: 13px; text-decoration: none; min-height: 0; }
+.side-foot a:hover, .side-foot button:hover { color: #fff; }
+.main { flex: 1; min-width: 0; min-height: 0; display: flex; flex-direction: column; }
+.topbar { height: 60px; flex: none; background: rgba(255,255,255,0.9); border-bottom: 1px solid var(--line); display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 0 28px; }
+#page-title { font-size: 16px; font-weight: 800; min-width: 0; }
+.account { position: relative; flex: none; }
+.account-btn { border: 1px solid var(--line); background: #fff; color: var(--ink); border-radius: 999px; padding: 8px 14px; font-size: 13px; font-weight: 800; cursor: pointer; min-height: 36px; }
+.account-btn:hover { border-color: #b7cdc4; }
+.account-menu { position: absolute; right: 0; top: calc(100% + 8px); min-width: 160px; background: #fff; border: 1px solid var(--line); border-radius: 12px; box-shadow: var(--shadow); padding: 6px; z-index: 15; }
+.account-menu button { width: 100%; border: 0; background: transparent; text-align: left; border-radius: 8px; padding: 10px 12px; cursor: pointer; font-size: 13px; font-weight: 700; color: var(--ink); min-height: 0; }
+.account-menu button:hover { background: #f4f7f5; }
+.content { flex: 1; min-height: 0; padding: 16px; display: flex; flex-direction: column; }
+#panel { flex: 1; min-height: 0; display: flex; flex-direction: column; }
+.card { flex: 1; min-height: 0; display: flex; flex-direction: column; overflow: hidden; background: var(--card); border: 1px solid var(--line); border-radius: 16px; padding: 22px; }
+form.card { overflow: auto; }
+.settings-block { flex: none; padding-bottom: 16px; margin-bottom: 16px; border-bottom: 1px solid var(--line); }
+.settings-block h2 { font-size: 16px; }
+.settings-row { display: grid; grid-template-columns: minmax(220px, 1fr) 180px auto; gap: 12px; align-items: end; margin-top: 12px; }
+.settings-row .field { margin-top: 0; min-width: 0; }
+.settings-row .primary { margin-top: 0; white-space: nowrap; }
+.settings-block .hint { margin-top: 8px; }
+.table-scroll { flex: 1; min-height: 0; overflow: auto; }
+.table-scroll table { margin-top: 12px; }
+.col-time { white-space: nowrap; }
+.card h2 { font-size: 18px; margin-bottom: 4px; }
+.lead, .hint { color: var(--muted); font-size: 13px; }
+.field { margin-top: 14px; }
+.field-label { display: block; font-size: 13px; font-weight: 700; margin-bottom: 6px; }
+input, select, textarea { width: 100%; border: 1px solid #d5e0db; border-radius: 10px; padding: 10px 12px; background: #fff; color: inherit; }
+textarea { min-height: 180px; resize: vertical; font-family: Consolas, "Courier New", monospace; font-size: 12px; line-height: 1.45; }
+input:focus, select:focus, textarea:focus, .picker:focus-visible { outline: 3px solid rgba(15, 110, 86, 0.18); border-color: var(--accent); }
+.grid { display: grid; grid-template-columns: 1.2fr 1fr 0.9fr auto; gap: 10px; align-items: end; }
+.user-bind { grid-template-columns: 1.4fr 0.7fr auto; margin-top: 10px; }
+.pane-head { display: flex; justify-content: space-between; align-items: flex-start; gap: 16px; }
+.pane-head .primary, .pane-head .ghost { margin-top: 0; flex: none; }
+.filters { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-top: 14px; }
+.filters input, .filters select { width: auto; min-width: 140px; }
+.pager { flex: none; display: flex; flex-wrap: wrap; align-items: center; justify-content: flex-end; gap: 10px; margin-top: 14px; color: var(--muted); font-size: 13px; }
+.pager select { width: auto; min-width: 72px; }
+.pager button { min-height: 34px; }
+.jobs { max-width: 180px; }
+.primary, .solid { background: var(--accent); color: #fff; border: 0; border-radius: 10px; padding: 10px 16px; font-weight: 800; cursor: pointer; }
+.primary:hover, .solid:hover { background: var(--accent-dark); }
+.primary { margin-top: 16px; }
+.primary:disabled, .solid:disabled { background: #8fbfb0; cursor: not-allowed; }
+.form-error { margin-top: 10px; color: var(--danger); font-size: 13px; }
+.ok { margin-top: 10px; color: var(--ok); font-size: 13px; }
+.picker { width: 100%; border: 1px solid #d5e0db; border-radius: 10px; background: #f8fbf9; color: inherit; padding: 10px 12px; display: flex; align-items: center; justify-content: space-between; gap: 12px; cursor: pointer; text-align: left; }
+.picker-text { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.picker-text.placeholder { color: #8aa097; }
+.picker-go { flex: none; color: var(--accent); font-size: 13px; font-weight: 800; }
+table { width: 100%; border-collapse: collapse; margin-top: 16px; }
+th, td { text-align: left; padding: 12px 8px; border-bottom: 1px solid var(--line); font-size: 14px; vertical-align: middle; }
+th { color: var(--muted); font-size: 12px; font-weight: 800; }
+tbody tr:hover { background: #f7fbf9; }
+.text-btn { border: 0; background: none; color: var(--accent); cursor: pointer; padding: 0; font-weight: 800; min-height: 0; }
+.text-btn:hover { text-decoration: underline; }
+.text-btn:disabled { color: #8aa097; cursor: default; text-decoration: none; }
+.expired, .badge-bad { color: var(--danger); font-weight: 800; }
+.badge-ok { color: var(--ok); font-weight: 800; }
+.badge-now { color: var(--accent-dark); font-weight: 800; }
+.modal { position: fixed; inset: 0; background: rgba(16, 33, 28, 0.48); display: flex; align-items: center; justify-content: center; padding: 16px; z-index: 20; }
+#notice-modal { z-index: 30; }
+.dialog { width: min(480px, 100%); max-height: min(640px, 86vh); background: #fff; border-radius: 16px; display: flex; flex-direction: column; overflow: hidden; box-shadow: var(--shadow); }
+.cookie-dialog { width: min(680px, 100%); }
+.cookie-form { padding: 16px; overflow: auto; }
+.cookie-form .field + .field { margin-top: 12px; }
+.dialog header, .dialog footer { padding: 14px 16px; display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.dialog header { border-bottom: 1px solid var(--line); }
+.dialog footer { justify-content: flex-end; border-top: 1px solid var(--line); }
+.dialog h2 { font-size: 16px; margin: 0; }
+.ghost { border: 1px solid #d5e0db; background: #fff; color: var(--ink); border-radius: 10px; padding: 8px 14px; font-weight: 800; cursor: pointer; }
+.drive-crumbs { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; margin: 12px 0; font-size: 13px; color: var(--muted); }
+.drive-crumbs button { border: 0; background: none; color: var(--accent); cursor: pointer; padding: 0; font-weight: 800; min-height: 0; }
+.text-btn.danger { color: var(--danger); }
+.crumbs { display: flex; flex-wrap: wrap; gap: 4px; padding: 10px 16px 0; font-size: 13px; color: var(--muted); }
+.crumbs button { border: 0; background: none; color: var(--accent); cursor: pointer; padding: 0; font-weight: 800; min-height: 0; }
+.dir-list { overflow: auto; padding: 8px; min-height: 180px; }
+.dir-row { display: flex; align-items: center; gap: 8px; border-radius: 10px; }
+.dir-row:hover { background: #f7fbf9; }
+.dir-main, .dir-deeper { border: 0; background: none; cursor: pointer; }
+.dir-main { flex: 1; text-align: left; padding: 12px; font-weight: 700; }
+.dir-deeper { color: var(--accent); font-size: 13px; font-weight: 800; padding: 10px 12px; }
+.empty, .dialog-error { padding: 16px; color: var(--muted); font-size: 14px; }
+.dialog-error { color: var(--danger); }
+[hidden] { display: none !important; }
+@media (max-width: 800px) {
+  .shell { flex-direction: column; height: auto; min-height: 100%; overflow: visible; }
+  .side { width: 100%; padding: 12px; }
+  .brand { padding: 0 4px 10px; }
+  .menu { flex-direction: row; flex-wrap: wrap; }
+  .side-foot { margin-top: 10px; flex-direction: row; gap: 16px; padding: 0 4px; }
+  .content, #panel, .card, .table-scroll { overflow: visible; min-height: auto; }
+  .content { padding: 16px; }
+  .grid, .user-bind, .settings-row { grid-template-columns: 1fr; }
+  .filters input, .filters select, .pane-head .primary { width: 100%; }
+  .jobs, .primary { width: 100%; max-width: none; }
+  .modal { align-items: flex-end; padding: 0; }
+  .dialog { width: 100%; max-height: 82vh; border-radius: 16px 16px 0 0; }
+}
+</style>
+</head>
+<body>
+<div class="gate" id="auth">
+  <div class="gate-card">
+    <p class="eyebrow">Quark Drive</p>
+    <h1 id="gate-title">管理登录</h1>
+    <form id="setup" hidden>
+      <p class="lead">第一次打开时，在运行这个程序的电脑上设置密码。设置完成后用它登录。</p>
+      <div class="field">
+        <label class="field-label" for="setup-password">管理密码</label>
+        <input id="setup-password" type="password" autocomplete="new-password" required>
+      </div>
+      <button class="primary" type="submit">保存密码</button>
+      <p class="form-error" id="setup-error" hidden></p>
+    </form>
+    <form id="login" hidden>
+      <p class="lead">登录后可以管理 Cookie、用户账号和网盘目录。登录保持 60 分钟，最后 30 分钟内有操作会再延长 60 分钟。</p>
+      <div class="field">
+        <label class="field-label" for="admin-password">管理密码</label>
+        <input id="admin-password" type="password" autocomplete="current-password" required>
+      </div>
+      <button class="primary" type="submit">登录</button>
+      <p class="form-error" id="login-error" hidden></p>
+    </form>
+  </div>
+</div>
+<div class="shell" id="shell" hidden>
+  <aside class="side">
+    <div class="brand">
+      <strong>管理平台</strong>
+      <span>下载与账号</span>
+    </div>
+    <nav class="menu" id="menu" hidden>
+      <button type="button" data-view="cookies" class="active">Cookie管理</button>
+      <button type="button" data-view="users">用户账号</button>
+      <button type="button" data-view="logs">操作记录</button>
+      <button type="button" data-view="drive">网盘目录</button>
+    </nav>
+    <div class="side-foot">
+      <button type="button" id="logout" hidden>退出</button>
+    </div>
+  </aside>
+  <div class="main">
+    <header class="topbar">
+      <div id="page-title">管理登录</div>
+      <div class="account" id="account" hidden>
+        <button type="button" class="account-btn" id="account-btn">个人中心</button>
+        <div class="account-menu" id="account-menu" hidden>
+          <button type="button" id="open-password">修改密码</button>
+        </div>
+      </div>
+    </header>
+    <div class="content">
+      <div id="panel">
+        <section class="card" id="cookie-pane" data-pane="cookies">
+          <form id="settings" class="settings-block">
+            <h2>下载设置</h2>
+            <div class="settings-row">
+              <div class="field">
+                <label class="field-label" for="cloud">网盘目录</label>
+                <input id="cloud" type="text" value="/来自分享" placeholder="/来自分享">
+              </div>
+              <div class="field">
+                <label class="field-label" for="jobs">同时下载的文件数</label>
+                <select id="jobs" class="jobs">
+                  <option>1</option><option>2</option><option selected>3</option>
+                  <option>4</option><option>6</option><option>8</option>
+                </select>
+              </div>
+              <button class="primary" type="submit">保存设置</button>
+            </div>
+            <p class="hint" id="cloud-hint"></p>
+            <p class="hint">用户下载时，用该账号配置的同时下载数。</p>
+            <p class="ok" id="settings-ok" hidden>已保存</p>
+            <p class="form-error" id="settings-error" hidden></p>
+          </form>
+          <div class="pane-head">
+            <div>
+              <h2>Cookie管理</h2>
+              <p class="lead">每个用户下载时只用自己绑定的 Cookie。标为「当前」的这一份只用于管理端创建网盘目录。一份可用 Cookie 最多绑定 8 个账号。</p>
+            </div>
+            <button class="primary" id="cookie-add" type="button">添加 Cookie</button>
+          </div>
+          <p class="form-error" id="cookie-error" hidden></p>
+          <div class="table-scroll">
+            <table>
+              <thead><tr><th>名称</th><th>内容</th><th>状态</th><th></th></tr></thead>
+              <tbody id="cookie-rows"></tbody>
+            </table>
+            <p class="hint" id="no-cookies">还没有 Cookie。点右上角添加。</p>
+          </div>
+        </section>
+        <section class="card" data-pane="drive" hidden>
+          <div class="pane-head">
+            <div>
+              <h2>网盘目录</h2>
+              <p class="lead">使用标为「当前」的 Cookie 查看网盘。点文件夹进入。删除会从网盘去掉，不能恢复。</p>
+            </div>
+            <button class="ghost" id="drive-refresh" type="button">刷新</button>
+          </div>
+          <div class="drive-crumbs" id="drive-crumbs"></div>
+          <p class="form-error" id="drive-error" hidden></p>
+          <div class="table-scroll">
+            <table>
+              <thead><tr><th>名称</th><th>大小</th><th>修改时间</th><th></th></tr></thead>
+              <tbody id="drive-rows"></tbody>
+            </table>
+            <p class="hint" id="drive-empty" hidden>这个目录是空的。</p>
+          </div>
+        </section>
+        <section class="card" data-pane="users" hidden>
+          <div class="pane-head">
+            <div>
+              <h2>用户账号</h2>
+              <p class="lead">按创建时间从新到旧。每个可用 Cookie 最多绑定 8 个账号。时间按北京时间，精确到秒。</p>
+            </div>
+            <button class="primary" id="user-add" type="button">添加账号</button>
+          </div>
+          <div class="filters">
+            <input id="user-query" type="search" placeholder="搜索账号或 Cookie">
+            <select id="user-filter-cookie">
+              <option value="">全部 Cookie</option>
+              <option value="__none__">未绑定</option>
+            </select>
+            <select id="user-filter-state">
+              <option value="">全部状态</option>
+              <option value="ok">有效</option>
+              <option value="expired">已过期</option>
+            </select>
+            <button class="ghost" id="user-search" type="button">查询</button>
+          </div>
+          <p class="form-error" id="user-error" hidden></p>
+          <div class="table-scroll">
+            <table>
+              <thead><tr><th>账号</th><th class="col-time">创建时间</th><th class="col-time">有效期</th><th>Cookie</th><th>同时下载</th><th></th></tr></thead>
+              <tbody id="users"></tbody>
+            </table>
+            <p class="hint" id="no-users">还没有用户。</p>
+          </div>
+          <div class="pager">
+            <span id="user-page-info"></span>
+            <label>每页
+              <select id="user-page-size">
+                <option value="5">5</option>
+                <option value="10" selected>10</option>
+                <option value="20">20</option>
+              </select>
+            </label>
+            <button class="ghost" id="user-prev" type="button">上一页</button>
+            <button class="ghost" id="user-next" type="button">下一页</button>
+          </div>
+        </section>
+        <section class="card" id="log-pane" data-pane="logs" hidden>
+          <h2>操作记录</h2>
+          <p class="lead">账号、Cookie、下载设置和下载结果会记在这里。Cookie 内容本身不会写进记录。</p>
+          <div class="table-scroll">
+            <table>
+              <thead><tr><th class="col-time">时间</th><th>谁</th><th>动作</th><th>内容</th></tr></thead>
+              <tbody id="log-rows"></tbody>
+            </table>
+            <p class="hint" id="no-logs">还没有操作记录。</p>
+          </div>
+          <div class="pager">
+            <span id="log-page-info"></span>
+            <label>每页
+              <select id="log-page-size">
+                <option value="5">5</option>
+                <option value="10" selected>10</option>
+                <option value="20">20</option>
+              </select>
+            </label>
+            <button class="ghost" id="log-prev" type="button">上一页</button>
+            <button class="ghost" id="log-next" type="button">下一页</button>
+          </div>
+        </section>
+      </div>
+    </div>
+  </div>
+</div>
+<div class="modal" id="cookie-modal" hidden>
+  <div class="dialog cookie-dialog" role="dialog" aria-modal="true" aria-labelledby="cookie-dialog-title">
+    <header>
+      <h2 id="cookie-dialog-title">添加 Cookie</h2>
+      <button type="button" class="text-btn" id="cookie-modal-close">关闭</button>
+    </header>
+    <div class="cookie-form">
+      <div class="field">
+        <label class="field-label" for="cookie-label">名称</label>
+        <input id="cookie-label" type="text" autocomplete="off" placeholder="例如 会员号">
+      </div>
+      <div class="field">
+        <label class="field-label" for="cookie-value">Cookie</label>
+        <textarea id="cookie-value" autocomplete="off" placeholder="从浏览器复制的整段 Cookie"></textarea>
+      </div>
+      <p class="form-error" id="cookie-dialog-error" hidden></p>
+    </div>
+    <footer>
+      <button type="button" class="ghost" id="cookie-modal-cancel">取消</button>
+      <button type="button" class="solid" id="cookie-save">保存</button>
+    </footer>
+  </div>
+</div>
+<div class="modal" id="saved-modal" hidden>
+  <div class="dialog" role="dialog" aria-modal="true" aria-labelledby="saved-title">
+    <header>
+      <h2 id="saved-title">保存成功</h2>
+      <button type="button" class="text-btn" id="saved-close">关闭</button>
+    </header>
+    <div class="cookie-form">
+      <p id="saved-text"></p>
+    </div>
+    <footer>
+      <button type="button" class="solid" id="saved-ok">知道了</button>
+    </footer>
+  </div>
+</div>
+<div class="modal" id="user-add-modal" hidden>
+  <div class="dialog" role="dialog" aria-modal="true" aria-labelledby="user-add-title">
+    <header>
+      <h2 id="user-add-title">添加账号</h2>
+      <button type="button" class="text-btn" id="user-add-close">关闭</button>
+    </header>
+    <form class="cookie-form" id="user-form">
+      <div class="field">
+        <label class="field-label" for="user-name">账号</label>
+        <input id="user-name" type="text" autocomplete="off" placeholder="留空自动生成">
+      </div>
+      <div class="field">
+        <label class="field-label" for="user-password">密码</label>
+        <input id="user-password" type="text" autocomplete="off" value="123456">
+        <p class="hint">账号留空会自动生成。密码默认 123456，可以修改。</p>
+      </div>
+      <div class="field">
+        <label class="field-label" for="user-expire">有效期</label>
+        <input id="user-expire" type="datetime-local" step="1" required>
+      </div>
+      <div class="field">
+        <label class="field-label" for="user-cookie">绑定 Cookie</label>
+        <select id="user-cookie" required></select>
+      </div>
+      <div class="field">
+        <label class="field-label" for="user-limit">同时下载</label>
+        <input id="user-limit" type="number" min="1" max="8" value="2" required>
+        <p class="hint">这个账号同时最多下载几个文件，最多 8 个。</p>
+      </div>
+      <p class="form-error" id="user-add-error" hidden></p>
+    </form>
+    <footer>
+      <button type="button" class="ghost" id="user-add-cancel">取消</button>
+      <button class="solid" type="submit" form="user-form" id="user-add-submit">添加</button>
+    </footer>
+  </div>
+</div>
+<div class="modal" id="bind-modal" hidden>
+  <div class="dialog" role="dialog" aria-modal="true" aria-labelledby="bind-title">
+    <header>
+      <h2 id="bind-title">编辑账号</h2>
+      <button type="button" class="text-btn" id="bind-close">关闭</button>
+    </header>
+    <div class="cookie-form">
+      <p class="hint" id="bind-name"></p>
+      <div class="field">
+        <label class="field-label" for="bind-expire">有效期</label>
+        <input id="bind-expire" type="datetime-local" step="1">
+      </div>
+      <div class="field">
+        <label class="field-label" for="bind-cookie">绑定 Cookie</label>
+        <select id="bind-cookie"></select>
+      </div>
+      <div class="field">
+        <label class="field-label" for="bind-limit">同时下载</label>
+        <input id="bind-limit" type="number" min="1" max="8" value="2">
+        <p class="hint">这个账号同时最多下载几个文件，最多 8 个。</p>
+      </div>
+      <p class="form-error" id="bind-error" hidden></p>
+    </div>
+    <footer>
+      <button type="button" class="ghost" id="bind-cancel">取消</button>
+      <button type="button" class="solid" id="bind-save">保存</button>
+    </footer>
+  </div>
+</div>
+<div class="modal" id="delivery-modal" hidden>
+  <div class="dialog" role="dialog" aria-modal="true" aria-labelledby="delivery-title">
+    <header>
+      <h2 id="delivery-title">生成交付链接</h2>
+      <button type="button" class="text-btn" id="delivery-close">关闭</button>
+    </header>
+    <div class="cookie-form">
+      <p class="hint" id="delivery-name"></p>
+      <div class="field">
+        <label class="field-label" for="delivery-password">交付密码</label>
+        <input id="delivery-password" type="text" autocomplete="off" value="123456">
+        <p class="hint">会写入网盘目录下的 desc.txt，并同步重置该账号密码。然后生成无提取码分享链接。</p>
+      </div>
+      <div class="field" id="delivery-result" hidden>
+        <label class="field-label" for="delivery-url">分享链接</label>
+        <div style="display:flex; gap:8px; align-items:center;">
+          <input id="delivery-url" type="text" readonly style="flex:1; min-width:0;">
+          <button type="button" class="solid" id="delivery-copy" style="flex:none; white-space:nowrap;">复制链接</button>
+        </div>
+        <p class="hint" id="delivery-path"></p>
+      </div>
+      <p class="form-error" id="delivery-error" hidden></p>
+    </div>
+    <footer>
+      <button type="button" class="ghost" id="delivery-cancel">关闭</button>
+      <button type="button" class="solid" id="delivery-save">生成</button>
+    </footer>
+  </div>
+</div>
+<div class="modal" id="password-modal" hidden>
+  <div class="dialog" role="dialog" aria-modal="true" aria-labelledby="password-title">
+    <header>
+      <h2 id="password-title">修改密码</h2>
+      <button type="button" class="text-btn" id="password-close">关闭</button>
+    </header>
+    <form class="cookie-form" id="password-form">
+      <div class="field">
+        <label class="field-label" for="password-old">旧密码</label>
+        <input id="password-old" type="password" autocomplete="current-password" required>
+      </div>
+      <div class="field">
+        <label class="field-label" for="password-new">新密码</label>
+        <input id="password-new" type="password" autocomplete="new-password" required>
+      </div>
+      <div class="field">
+        <label class="field-label" for="password-again">确认新密码</label>
+        <input id="password-again" type="password" autocomplete="new-password" required>
+      </div>
+      <p class="hint">新密码至少 4 位。改完后当前登录仍有效，其它管理端会话会退出。</p>
+      <p class="form-error" id="password-error" hidden></p>
+    </form>
+    <footer>
+      <button type="button" class="ghost" id="password-cancel">取消</button>
+      <button class="solid" type="submit" form="password-form" id="password-save">保存</button>
+    </footer>
+  </div>
+</div>
+<div class="modal" id="notice-modal" hidden>
+  <div class="dialog" role="dialog" aria-modal="true" aria-labelledby="notice-title">
+    <header>
+      <h2 id="notice-title">提示</h2>
+      <button type="button" class="text-btn" id="notice-close">关闭</button>
+    </header>
+    <div class="cookie-form">
+      <p id="notice-text" style="white-space: pre-line"></p>
+    </div>
+    <footer>
+      <button type="button" class="ghost" id="notice-cancel" hidden>取消</button>
+      <button type="button" class="solid" id="notice-ok">知道了</button>
+    </footer>
+  </div>
+</div>
+<script>
+const TOKEN = "@@TOKEN@@";
+const setupForm = document.getElementById("setup");
+const loginForm = document.getElementById("login");
+const auth = document.getElementById("auth");
+const panel = document.getElementById("panel");
+const menu = document.getElementById("menu");
+const pageTitle = document.getElementById("page-title");
+const logoutBtn = document.getElementById("logout");
+const accountBox = document.getElementById("account");
+const accountBtn = document.getElementById("account-btn");
+const accountMenu = document.getElementById("account-menu");
+const passwordBtn = document.getElementById("open-password");
+const cloudInput = document.getElementById("cloud");
+const jobsInput = document.getElementById("jobs");
+const usersEl = document.getElementById("users");
+const noUsers = document.getElementById("no-users");
+const cookieRows = document.getElementById("cookie-rows");
+const noCookies = document.getElementById("no-cookies");
+const cookieModal = document.getElementById("cookie-modal");
+const cookieDialogTitle = document.getElementById("cookie-dialog-title");
+const cookieLabel = document.getElementById("cookie-label");
+const cookieValue = document.getElementById("cookie-value");
+const titles = { cookies: "Cookie管理", users: "用户账号", logs: "操作记录", drive: "网盘目录" };
+let drivePath = "/";
+let allLogs = [];
+let logPage = 1;
+let editingCookie = "";
+let bindUser = "";
+let knownCookies = [];
+let allUsers = [];
+let userPage = 1;
+let userFilter = { q: "", cookie: "", state: "" };
+
+function showError(id, message) {
+  const el = document.getElementById(id);
+  el.hidden = !message;
+  el.textContent = message || "";
+}
+
+async function call(path, body) {
+  const res = await fetch(path, {
+    method: body ? "POST" : "GET",
+    headers: body ? {
+      "Accept": "application/json",
+      "Content-Type": "application/json",
+      "X-Requested-With": TOKEN
+    } : { "Accept": "application/json" },
+    body: body ? JSON.stringify(body) : undefined
+  });
+  const data = await res.json().catch(() => ({}));
+  if (res.status === 401 && path !== "/api/admin/login" && path !== "/api/admin/setup") {
+    showError("login-error", data.error || "登录已过期，请重新登录");
+    showAuth("login");
+  }
+  if (!res.ok || data.ok === false) throw new Error(data.error || "请求失败");
+  return data;
+}
+
+function savedView() {
+  try {
+    const name = localStorage.getItem("qd-admin-view");
+    if (name === "settings") return "cookies";
+    return titles[name] ? name : "cookies";
+  } catch (err) {
+    return "cookies";
+  }
+}
+
+function showView(name) {
+  if (name === "settings") name = "cookies";
+  if (!titles[name]) name = "cookies";
+  try { localStorage.setItem("qd-admin-view", name); } catch (err) {}
+  document.querySelectorAll("[data-pane]").forEach((pane) => {
+    pane.hidden = pane.dataset.pane !== name;
+  });
+  menu.querySelectorAll("button").forEach((button) => {
+    button.classList.toggle("active", button.dataset.view === name);
+  });
+  pageTitle.textContent = titles[name] || "管理平台";
+  if (name === "logs") loadLogs();
+  if (name === "drive") loadDrive(drivePath);
+}
+
+async function loadLogs() {
+  const rows = document.getElementById("log-rows");
+  const empty = document.getElementById("no-logs");
+  try {
+    const data = await call("/api/admin/logs");
+    allLogs = data.logs || [];
+    logPage = 1;
+    empty.textContent = "还没有操作记录。";
+    drawLogPage();
+  } catch (err) {
+    allLogs = [];
+    rows.textContent = "";
+    empty.hidden = false;
+    empty.textContent = err.message || "记录没有读出来";
+    document.getElementById("log-page-info").textContent = "";
+    document.getElementById("log-prev").disabled = true;
+    document.getElementById("log-next").disabled = true;
+  }
+}
+
+function drawLogPage() {
+  const rows = document.getElementById("log-rows");
+  const empty = document.getElementById("no-logs");
+  const size = Number(document.getElementById("log-page-size").value) || 10;
+  const pages = Math.max(1, Math.ceil(allLogs.length / size));
+  if (logPage > pages) logPage = pages;
+  if (logPage < 1) logPage = 1;
+  const start = (logPage - 1) * size;
+  rows.textContent = "";
+  empty.hidden = allLogs.length > 0;
+  allLogs.slice(start, start + size).forEach((item) => {
+    const row = document.createElement("tr");
+    [item.at, item.actor, item.action, item.detail].forEach((text) => {
+      const cell = document.createElement("td");
+      cell.textContent = text || "";
+      row.append(cell);
+    });
+    if (item.ok === false) row.className = "expired";
+    rows.append(row);
+  });
+  const info = document.getElementById("log-page-info");
+  info.textContent = allLogs.length ? ("共 " + allLogs.length + " 条，第 " + logPage + " / " + pages + " 页") : "";
+  document.getElementById("log-prev").disabled = logPage <= 1;
+  document.getElementById("log-next").disabled = logPage >= pages;
+}
+
+function formatSize(size) {
+  const units = ["B", "KB", "MB", "GB", "TB"];
+  let value = Number(size) || 0;
+  let index = 0;
+  while (value >= 1024 && index < units.length - 1) {
+    value /= 1024;
+    index += 1;
+  }
+  return (index === 0 ? String(Math.round(value)) : value.toFixed(1)) + " " + units[index];
+}
+
+function joinCloud(parent, name) {
+  if (!parent || parent === "/") return "/" + name;
+  return parent.replace(/\/$/, "") + "/" + name;
+}
+
+async function loadDrive(path) {
+  showError("drive-error", "");
+  try {
+    const data = await call("/api/admin/drive?path=" + encodeURIComponent(path || "/"));
+    renderDrive(data);
+  } catch (err) {
+    document.getElementById("drive-rows").textContent = "";
+    document.getElementById("drive-empty").hidden = true;
+    showError("drive-error", err.message || "目录没有读出来");
+  }
+}
+
+function renderDrive(data) {
+  drivePath = data.path || "/";
+  const crumbs = document.getElementById("drive-crumbs");
+  crumbs.textContent = "";
+  const root = document.createElement("button");
+  root.type = "button";
+  root.textContent = "根目录";
+  root.addEventListener("click", () => loadDrive("/"));
+  crumbs.append(root);
+  const parts = drivePath.split("/").filter(Boolean);
+  let built = "";
+  parts.forEach((part, index) => {
+    built += "/" + part;
+    crumbs.append(document.createTextNode(" / "));
+    if (index === parts.length - 1) {
+      const current = document.createElement("span");
+      current.textContent = part;
+      crumbs.append(current);
+    } else {
+      const target = built;
+      const button = document.createElement("button");
+      button.type = "button";
+      button.textContent = part;
+      button.addEventListener("click", () => loadDrive(target));
+      crumbs.append(button);
+    }
+  });
+  const rows = document.getElementById("drive-rows");
+  const empty = document.getElementById("drive-empty");
+  rows.textContent = "";
+  const entries = data.entries || [];
+  empty.hidden = entries.length > 0;
+  if (drivePath !== "/") {
+    const up = document.createElement("tr");
+    const name = document.createElement("td");
+    const link = document.createElement("button");
+    link.type = "button";
+    link.className = "text-btn";
+    link.textContent = "..";
+    const parent = drivePath.split("/").slice(0, -1).join("/") || "/";
+    link.addEventListener("click", () => loadDrive(parent));
+    name.append(link);
+    up.append(name, document.createElement("td"), document.createElement("td"), document.createElement("td"));
+    rows.append(up);
+  }
+  entries.forEach((entry) => {
+    const row = document.createElement("tr");
+    const name = document.createElement("td");
+    if (entry.dir) {
+      const link = document.createElement("button");
+      link.type = "button";
+      link.className = "text-btn";
+      link.textContent = entry.name || "";
+      link.addEventListener("click", () => loadDrive(joinCloud(drivePath, entry.name || "")));
+      name.append(link);
+    } else {
+      name.textContent = entry.name || "";
+    }
+    const size = document.createElement("td");
+    size.textContent = entry.dir ? "—" : formatSize(entry.size);
+    const time = document.createElement("td");
+    time.textContent = entry.updated_on || "—";
+    const action = document.createElement("td");
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "text-btn danger";
+    button.textContent = "删除";
+    button.addEventListener("click", () => deleteDriveEntry(entry));
+    action.append(button);
+    row.append(name, size, time, action);
+    rows.append(row);
+  });
+}
+
+async function deleteDriveEntry(entry) {
+  const kind = entry.dir ? "目录" : "文件";
+  const name = entry.name || "";
+  const ok = await askNotice({
+    title: "删除" + kind,
+    text: "删除" + kind + "「" + name + "」？会从网盘去掉，不能恢复。",
+    ok: "删除",
+    cancel: "取消"
+  });
+  if (!ok) return;
+  showError("drive-error", "");
+  try {
+    const data = await call("/api/admin/drive/delete", { path: drivePath, fid: entry.fid });
+    renderDrive(data);
+  } catch (err) {
+    await askNotice({ title: "删除失败", text: err.message || "删除失败" });
+  }
+}
+
+function cookieStatus(cookie) {
+  if (cookie.status === "invalid") return { text: "失效", className: "badge-bad" };
+  if (cookie.status === "ok") return { text: "可用", className: "badge-ok" };
+  return { text: "未检测", className: "" };
+}
+
+function openCookieModal(cookie) {
+  editingCookie = cookie ? cookie.id : "";
+  cookieDialogTitle.textContent = cookie ? "修改 Cookie" : "添加 Cookie";
+  cookieLabel.value = cookie ? (cookie.label || "") : "";
+  cookieValue.value = cookie ? (cookie.value || "") : "";
+  showError("cookie-dialog-error", "");
+  cookieModal.hidden = false;
+  cookieLabel.focus();
+}
+
+function closeCookieModal() {
+  cookieModal.hidden = true;
+  editingCookie = "";
+}
+
+function fillCookieSelect(select, selectedId, allowCurrentFull) {
+  if (!select) return;
+  select.textContent = "";
+  const blank = document.createElement("option");
+  blank.value = "";
+  blank.textContent = "请选择";
+  select.append(blank);
+  knownCookies.forEach((cookie) => {
+    if (cookie.status === "invalid" && cookie.id !== selectedId) return;
+    const bound = cookie.bound || 0;
+    const option = document.createElement("option");
+    option.value = cookie.id;
+    const full = bound >= 8 && !(allowCurrentFull && cookie.id === selectedId);
+    option.textContent = (cookie.label || "未命名") + "（" + bound + "/8）" + (full ? " 已满" : "");
+    option.disabled = full;
+    select.append(option);
+  });
+  select.value = selectedId || "";
+}
+
+function fillUserFilter() {
+  const select = document.getElementById("user-filter-cookie");
+  if (!select) return;
+  const current = userFilter.cookie || select.value;
+  select.textContent = "";
+  const all = document.createElement("option");
+  all.value = "";
+  all.textContent = "全部 Cookie";
+  select.append(all);
+  const none = document.createElement("option");
+  none.value = "__none__";
+  none.textContent = "未绑定";
+  select.append(none);
+  knownCookies.forEach((cookie) => {
+    const option = document.createElement("option");
+    option.value = cookie.id;
+    option.textContent = cookie.label || "未命名";
+    select.append(option);
+  });
+  select.value = current;
+  if (select.value !== current) select.value = "";
+}
+
+function renderCookies(cookies) {
+  knownCookies = cookies || [];
+  fillCookieSelect(document.getElementById("user-cookie"), document.getElementById("user-cookie").value, false);
+  fillUserFilter();
+  cookieRows.textContent = "";
+  noCookies.hidden = cookies.length > 0;
+  cookies.forEach((cookie) => {
+    const row = document.createElement("tr");
+    const name = document.createElement("td");
+    name.textContent = cookie.label || "";
+    const preview = document.createElement("td");
+    preview.textContent = cookie.preview || "";
+    const state = document.createElement("td");
+    const status = cookieStatus(cookie);
+    const mark = document.createElement("div");
+    mark.className = status.className;
+    mark.textContent = (cookie.active ? "当前 · " : "") + status.text;
+    state.append(mark);
+    if (cookie.error) {
+      const detail = document.createElement("div");
+      detail.className = "hint";
+      detail.textContent = cookie.error;
+      state.append(detail);
+    }
+    const action = document.createElement("td");
+    const use = document.createElement("button");
+    use.type = "button";
+    use.className = "text-btn";
+    use.textContent = cookie.active ? "当前使用" : "设为当前";
+    use.disabled = !!cookie.active;
+    use.addEventListener("click", async () => {
+      showError("cookie-error", "");
+      try {
+        const data = await call("/api/admin/cookies/use", { id: cookie.id });
+        renderCookies(data.cookies || []);
+      } catch (err) {
+        await askNotice({ title: "切换失败", text: err.message || "切换失败" });
+      }
+    });
+    const edit = document.createElement("button");
+    edit.type = "button";
+    edit.className = "text-btn";
+    edit.textContent = "修改";
+    edit.style.marginLeft = "10px";
+    edit.addEventListener("click", () => openCookieModal(cookie));
+    const remove = document.createElement("button");
+    remove.type = "button";
+    remove.className = "text-btn";
+    remove.textContent = "删除";
+    remove.style.marginLeft = "10px";
+    remove.addEventListener("click", async () => {
+      const ok = await askNotice({
+        title: "删除 Cookie",
+        text: "删除 Cookie「" + (cookie.label || "") + "」？已绑定的账号会解除绑定。",
+        ok: "删除",
+        cancel: "取消"
+      });
+      if (!ok) return;
+      showError("cookie-error", "");
+      try {
+        const data = await call("/api/admin/cookies/delete", { id: cookie.id });
+        if (editingCookie === cookie.id) closeCookieModal();
+        renderCookies(data.cookies || []);
+      } catch (err) {
+        await askNotice({ title: "删除失败", text: err.message || "删除失败" });
+      }
+    });
+    action.append(use, edit, remove);
+    const bound = document.createElement("div");
+    bound.className = "hint";
+    bound.textContent = "已绑定 " + (cookie.bound || 0) + "/8";
+    name.append(bound);
+    row.append(name, preview, state, action);
+    cookieRows.append(row);
+  });
+}
+
+function userMatches(user) {
+  const query = userFilter.q;
+  const blob = ((user.name || "") + " " + (user.cookie_label || "")).toLowerCase();
+  if (query && !blob.includes(query)) return false;
+  if (userFilter.cookie === "__none__" && user.cookie_id) return false;
+  if (userFilter.cookie && userFilter.cookie !== "__none__" && user.cookie_id !== userFilter.cookie) return false;
+  if (userFilter.state === "expired" && !user.expired) return false;
+  if (userFilter.state === "ok" && user.expired) return false;
+  return true;
+}
+
+function renderUsers(users) {
+  allUsers = (users || []).slice().sort((left, right) => (right.created_at || 0) - (left.created_at || 0) || String(left.name).localeCompare(String(right.name)));
+  drawUserPage();
+}
+
+function drawUserPage() {
+  const filtered = allUsers.filter(userMatches);
+  const size = Number(document.getElementById("user-page-size").value) || 10;
+  const pages = Math.max(1, Math.ceil(filtered.length / size));
+  if (userPage > pages) userPage = pages;
+  if (userPage < 1) userPage = 1;
+  const start = (userPage - 1) * size;
+  usersEl.textContent = "";
+  noUsers.hidden = filtered.length > 0;
+  noUsers.textContent = allUsers.length ? "没有符合条件的账号。" : "还没有用户。";
+  filtered.slice(start, start + size).forEach((user) => {
+    const row = document.createElement("tr");
+    const name = document.createElement("td");
+    name.textContent = user.name;
+    const created = document.createElement("td");
+    created.className = "col-time";
+    created.textContent = user.created_on || "—";
+    const expire = document.createElement("td");
+    expire.className = "col-time";
+    expire.textContent = user.expires_on || "";
+    if (user.expired) {
+      expire.className = "expired";
+      expire.textContent += " 已过期";
+    }
+    const cookieCell = document.createElement("td");
+    cookieCell.textContent = user.cookie_label || "未绑定";
+    if (!user.cookie_id) cookieCell.className = "expired";
+    const times = document.createElement("td");
+    times.textContent = String(user.download_limit || 2);
+    const action = document.createElement("td");
+    const bind = document.createElement("button");
+    bind.type = "button";
+    bind.className = "text-btn";
+    bind.textContent = "编辑";
+    bind.style.marginRight = "10px";
+    bind.addEventListener("click", () => openBind(user));
+    const delivery = document.createElement("button");
+    delivery.type = "button";
+    delivery.className = "text-btn";
+    delivery.textContent = "生成链接";
+    delivery.style.marginRight = "10px";
+    delivery.addEventListener("click", () => openDelivery(user));
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "text-btn";
+    button.textContent = "删除";
+    button.addEventListener("click", async () => {
+      const ok = await askNotice({
+        title: "删除账号",
+        text: "删除账号「" + user.name + "」？删除后不能恢复。",
+        ok: "删除",
+        cancel: "取消"
+      });
+      if (!ok) return;
+      showError("user-error", "");
+      try {
+        const data = await call("/api/admin/users/delete", { name: user.name });
+        renderUsers(data.users || []);
+      } catch (err) {
+        await askNotice({ title: "删除失败", text: err.message || "删除失败" });
+      }
+    });
+    action.append(bind, delivery, button);
+    row.append(name, created, expire, cookieCell, times, action);
+    usersEl.append(row);
+  });
+  const info = document.getElementById("user-page-info");
+  info.textContent = filtered.length ? ("共 " + filtered.length + " 条，第 " + userPage + " / " + pages + " 页") : "";
+  document.getElementById("user-prev").disabled = userPage <= 1;
+  document.getElementById("user-next").disabled = userPage >= pages;
+}
+
+function applyUserQuery() {
+  userFilter = {
+    q: document.getElementById("user-query").value.trim().toLowerCase(),
+    cookie: document.getElementById("user-filter-cookie").value,
+    state: document.getElementById("user-filter-state").value
+  };
+  userPage = 1;
+  drawUserPage();
+}
+
+function randomAccount() {
+  const alphabet = "abcdefghijkmnpqrstuvwxyz23456789";
+  const taken = new Set(allUsers.map((user) => user.name));
+  for (let attempt = 0; attempt < 20; attempt += 1) {
+    const bytes = new Uint8Array(6);
+    crypto.getRandomValues(bytes);
+    let name = "u";
+    bytes.forEach((byte) => {
+      name += alphabet[byte % alphabet.length];
+    });
+    if (!taken.has(name)) return name;
+  }
+  return "u" + Date.now().toString(36);
+}
+
+function openUserAdd() {
+  showError("user-add-error", "");
+  document.getElementById("user-name").value = "";
+  document.getElementById("user-password").value = "123456";
+  document.getElementById("user-expire").value = "";
+  document.getElementById("user-limit").value = jobsInput.value || "2";
+  fillCookieSelect(document.getElementById("user-cookie"), "", false);
+  document.getElementById("user-add-modal").hidden = false;
+  document.getElementById("user-name").focus();
+}
+
+function closeUserAdd() {
+  document.getElementById("user-add-modal").hidden = true;
+  showError("user-add-error", "");
+}
+
+function showAuth(which) {
+  auth.hidden = false;
+  document.getElementById("shell").hidden = true;
+  panel.hidden = true;
+  menu.hidden = true;
+  logoutBtn.hidden = true;
+  accountBox.hidden = true;
+  accountMenu.hidden = true;
+  setupForm.hidden = which !== "setup";
+  loginForm.hidden = which !== "login";
+  document.getElementById("gate-title").textContent = which === "setup" ? "设置管理密码" : "管理登录";
+}
+
+function showPanel(data) {
+  auth.hidden = true;
+  document.getElementById("shell").hidden = false;
+  setupForm.hidden = true;
+  loginForm.hidden = true;
+  panel.hidden = false;
+  menu.hidden = false;
+  logoutBtn.hidden = false;
+  accountBox.hidden = false;
+  accountMenu.hidden = true;
+  const settings = data.settings || {};
+  cloudInput.value = settings.cloud_dir || "/来自分享";
+  showCloudHint();
+  jobsInput.value = String(settings.jobs || 3);
+  knownCookies = data.cookies || [];
+  renderUsers(data.users || []);
+  renderCookies(knownCookies);
+  fillCookieSelect(document.getElementById("user-cookie"), "", false);
+  showView(savedView());
+}
+
+async function loadState() {
+  const data = await call("/api/admin/state");
+  if (!data.ready) {
+    showAuth("setup");
+    return;
+  }
+  showPanel(data);
+}
+
+menu.addEventListener("click", (event) => {
+  const button = event.target.closest("button[data-view]");
+  if (button) showView(button.dataset.view);
+});
+
+setupForm.addEventListener("submit", async (event) => {
+  event.preventDefault();
+  showError("setup-error", "");
+  try {
+    await call("/api/admin/setup", { password: document.getElementById("setup-password").value });
+    showAuth("login");
+  } catch (err) {
+    showError("setup-error", err.message || "设置失败");
+  }
+});
+
+loginForm.addEventListener("submit", async (event) => {
+  event.preventDefault();
+  showError("login-error", "");
+  try {
+    await call("/api/admin/login", { password: document.getElementById("admin-password").value });
+    await loadState();
+  } catch (err) {
+    showError("login-error", err.message || "登录失败");
+  }
+});
+
+function showCloudHint() {
+  const raw = cloudInput.value.trim() || "/来自分享";
+  const parent = ("/" + raw.replace(/\\/g, "/")).replace(/\/+/g, "/").replace(/\/$/, "") || "/";
+  document.getElementById("cloud-hint").textContent = "保存后，新的转存目录是 " + parent + "/账号名";
+}
+
+cloudInput.addEventListener("input", showCloudHint);
+showCloudHint();
+
+function closeSaved() {
+  document.getElementById("saved-modal").hidden = true;
+}
+
+let noticeWait = null;
+
+function closeNotice(ok) {
+  document.getElementById("notice-modal").hidden = true;
+  const wait = noticeWait;
+  noticeWait = null;
+  if (wait) wait(!!ok);
+}
+
+function askNotice(options) {
+  if (noticeWait) noticeWait(false);
+  document.getElementById("notice-title").textContent = options.title || "提示";
+  document.getElementById("notice-text").textContent = options.text || "";
+  const cancel = document.getElementById("notice-cancel");
+  cancel.hidden = !options.cancel;
+  cancel.textContent = options.cancel || "取消";
+  document.getElementById("notice-ok").textContent = options.ok || "知道了";
+  document.getElementById("notice-modal").hidden = false;
+  return new Promise((resolve) => {
+    noticeWait = resolve;
+  });
+}
+
+document.getElementById("saved-close").addEventListener("click", closeSaved);
+document.getElementById("saved-ok").addEventListener("click", closeSaved);
+document.getElementById("saved-modal").addEventListener("click", (event) => {
+  if (event.target.id === "saved-modal") closeSaved();
+});
+document.getElementById("notice-close").addEventListener("click", () => closeNotice(false));
+document.getElementById("notice-cancel").addEventListener("click", () => closeNotice(false));
+document.getElementById("notice-ok").addEventListener("click", () => closeNotice(true));
+document.getElementById("notice-modal").addEventListener("click", (event) => {
+  if (event.target.id === "notice-modal") closeNotice(false);
+});
+
+document.getElementById("settings").addEventListener("submit", async (event) => {
+  event.preventDefault();
+  showError("settings-error", "");
+  const button = event.submitter;
+  if (button) button.disabled = true;
+  try {
+    const data = await call("/api/admin/settings", {
+      cloud_dir: cloudInput.value.trim(),
+      jobs: Number(jobsInput.value) || 3
+    });
+    const dir = data.created || (data.settings && data.settings.cloud_dir) || "/来自分享";
+    cloudInput.value = (data.settings && data.settings.cloud_dir) || dir;
+    showCloudHint();
+    document.getElementById("saved-text").textContent = "网盘目录 " + dir + " 已经创建。之后每个账号的文件会放在 " + dir + "/账号名。";
+    document.getElementById("saved-modal").hidden = false;
+  } catch (err) {
+    await askNotice({ title: "保存失败", text: err.message || "保存失败" });
+  } finally {
+    if (button) button.disabled = false;
+  }
+});
+
+document.getElementById("cookie-add").addEventListener("click", () => openCookieModal(null));
+document.getElementById("cookie-modal-close").addEventListener("click", closeCookieModal);
+document.getElementById("cookie-modal-cancel").addEventListener("click", closeCookieModal);
+cookieModal.addEventListener("click", (event) => {
+  if (event.target === cookieModal) closeCookieModal();
+});
+document.getElementById("cookie-save").addEventListener("click", async () => {
+  showError("cookie-dialog-error", "");
+  const label = cookieLabel.value.trim();
+  const value = cookieValue.value.trim();
+  if (!label || !value) {
+    showError("cookie-dialog-error", "请填写名称和 Cookie");
+    return;
+  }
+  try {
+    const path = editingCookie ? "/api/admin/cookies/update" : "/api/admin/cookies";
+    const body = editingCookie ? { id: editingCookie, label, value } : { label, value };
+    const data = await call(path, body);
+    closeCookieModal();
+    renderCookies(data.cookies || []);
+  } catch (err) {
+    showError("cookie-dialog-error", err.message || "保存失败");
+  }
+});
+
+document.getElementById("drive-refresh").addEventListener("click", () => loadDrive(drivePath));
+document.getElementById("user-add").addEventListener("click", openUserAdd);
+document.getElementById("user-add-close").addEventListener("click", closeUserAdd);
+document.getElementById("user-add-cancel").addEventListener("click", closeUserAdd);
+document.getElementById("user-search").addEventListener("click", applyUserQuery);
+document.getElementById("user-query").addEventListener("keydown", (event) => {
+  if (event.key === "Enter") {
+    event.preventDefault();
+    applyUserQuery();
+  }
+});
+document.getElementById("user-page-size").addEventListener("change", () => {
+  userPage = 1;
+  drawUserPage();
+});
+document.getElementById("user-prev").addEventListener("click", () => {
+  userPage -= 1;
+  drawUserPage();
+});
+document.getElementById("user-next").addEventListener("click", () => {
+  userPage += 1;
+  drawUserPage();
+});
+document.getElementById("log-page-size").addEventListener("change", () => {
+  logPage = 1;
+  drawLogPage();
+});
+document.getElementById("log-prev").addEventListener("click", () => {
+  logPage -= 1;
+  drawLogPage();
+});
+document.getElementById("log-next").addEventListener("click", () => {
+  logPage += 1;
+  drawLogPage();
+});
+document.getElementById("user-form").addEventListener("submit", async (event) => {
+  event.preventDefault();
+  showError("user-add-error", "");
+  const submitBtn = document.getElementById("user-add-submit");
+  const name = document.getElementById("user-name").value.trim() || randomAccount();
+  const password = document.getElementById("user-password").value || "123456";
+  submitBtn.disabled = true;
+  submitBtn.textContent = "添加中…";
+  try {
+    const data = await call("/api/admin/users", {
+      name,
+      password,
+      expires_on: document.getElementById("user-expire").value,
+      cookie_id: document.getElementById("user-cookie").value,
+      download_limit: Number(document.getElementById("user-limit").value) || 2
+    });
+    knownCookies = data.cookies || knownCookies;
+    userPage = 1;
+    renderUsers(data.users || []);
+    renderCookies(knownCookies);
+    closeUserAdd();
+    await askNotice({
+      title: "添加成功",
+      text: "账号 " + (data.name || name) + "\n密码 " + password,
+      ok: "知道了"
+    });
+  } catch (err) {
+    showError("user-add-error", err.message || "添加失败");
+  } finally {
+    submitBtn.disabled = false;
+    submitBtn.textContent = "添加";
+  }
+});
+
+function closeAccountMenu() {
+  accountMenu.hidden = true;
+}
+
+function openPassword() {
+  closeAccountMenu();
+  showError("password-error", "");
+  document.getElementById("password-old").value = "";
+  document.getElementById("password-new").value = "";
+  document.getElementById("password-again").value = "";
+  document.getElementById("password-modal").hidden = false;
+  document.getElementById("password-old").focus();
+}
+
+function closePassword() {
+  document.getElementById("password-modal").hidden = true;
+  showError("password-error", "");
+}
+
+accountBtn.addEventListener("click", (event) => {
+  event.stopPropagation();
+  accountMenu.hidden = !accountMenu.hidden;
+});
+passwordBtn.addEventListener("click", openPassword);
+document.addEventListener("click", (event) => {
+  if (!accountBox.contains(event.target)) closeAccountMenu();
+});
+document.getElementById("password-close").addEventListener("click", closePassword);
+document.getElementById("password-cancel").addEventListener("click", closePassword);
+document.getElementById("password-form").addEventListener("submit", async (event) => {
+  event.preventDefault();
+  showError("password-error", "");
+  const oldPassword = document.getElementById("password-old").value;
+  const newPassword = document.getElementById("password-new").value;
+  const again = document.getElementById("password-again").value;
+  if (newPassword !== again) {
+    showError("password-error", "两次输入的新密码不一致");
+    return;
+  }
+  const saveBtn = document.getElementById("password-save");
+  saveBtn.disabled = true;
+  saveBtn.textContent = "保存中…";
+  try {
+    await call("/api/admin/password", {
+      old_password: oldPassword,
+      new_password: newPassword
+    });
+    closePassword();
+    await askNotice({ title: "修改成功", text: "管理密码已更新。下次登录请用新密码。", ok: "知道了" });
+  } catch (err) {
+    showError("password-error", err.message || "没有改成");
+  } finally {
+    saveBtn.disabled = false;
+    saveBtn.textContent = "保存";
+  }
+});
+
+logoutBtn.addEventListener("click", async () => {
+  try { await call("/api/admin/logout", {}); } catch (err) {}
+  showAuth("login");
+});
+
+function closeBind() {
+  document.getElementById("bind-modal").hidden = true;
+  bindUser = "";
+  showError("bind-error", "");
+}
+
+function openBind(user) {
+  bindUser = user.name || "";
+  document.getElementById("bind-name").textContent = bindUser;
+  document.getElementById("bind-expire").value = (user.expires_on || "").replace(" ", "T");
+  document.getElementById("bind-limit").value = String(user.download_limit || 2);
+  fillCookieSelect(document.getElementById("bind-cookie"), user.cookie_id || "", true);
+  showError("bind-error", "");
+  document.getElementById("bind-modal").hidden = false;
+}
+
+document.getElementById("bind-close").addEventListener("click", closeBind);
+document.getElementById("bind-cancel").addEventListener("click", closeBind);
+document.getElementById("bind-save").addEventListener("click", async () => {
+  showError("bind-error", "");
+  const cookieId = document.getElementById("bind-cookie").value;
+  const expiresOn = document.getElementById("bind-expire").value;
+  if (!bindUser || !expiresOn) {
+    showError("bind-error", "请选择有效期");
+    return;
+  }
+  if (!cookieId) {
+    showError("bind-error", "请选择 Cookie");
+    return;
+  }
+  const savedName = bindUser;
+  const parallel = Number(document.getElementById("bind-limit").value) || 2;
+  const saveBtn = document.getElementById("bind-save");
+  saveBtn.disabled = true;
+  saveBtn.textContent = "保存中…";
+  try {
+    await call("/api/admin/users/expiry", { name: bindUser, expires_on: expiresOn });
+    const data = await call("/api/admin/users/bind", {
+      name: bindUser,
+      cookie_id: cookieId,
+      download_limit: parallel
+    });
+    knownCookies = data.cookies || knownCookies;
+    closeBind();
+    renderUsers(data.users || []);
+    renderCookies(knownCookies);
+    await askNotice({
+      title: "编辑成功",
+      text: "账号 " + savedName + " 已保存。\n同时下载 " + parallel,
+      ok: "知道了"
+    });
+  } catch (err) {
+    showError("bind-error", err.message || "没有改成");
+  } finally {
+    saveBtn.disabled = false;
+    saveBtn.textContent = "保存";
+  }
+});
+
+let deliveryUser = "";
+
+function closeDelivery() {
+  document.getElementById("delivery-modal").hidden = true;
+  deliveryUser = "";
+  showError("delivery-error", "");
+  document.getElementById("delivery-result").hidden = true;
+  document.getElementById("delivery-url").value = "";
+  document.getElementById("delivery-path").textContent = "";
+  document.getElementById("delivery-save").disabled = false;
+  document.getElementById("delivery-save").textContent = "生成";
+}
+
+function openDelivery(user) {
+  deliveryUser = user.name || "";
+  document.getElementById("delivery-name").textContent = "账号 " + deliveryUser;
+  document.getElementById("delivery-password").value = "123456";
+  document.getElementById("delivery-result").hidden = true;
+  document.getElementById("delivery-url").value = "";
+  document.getElementById("delivery-path").textContent = "";
+  document.getElementById("delivery-save").disabled = false;
+  document.getElementById("delivery-save").textContent = "生成";
+  showError("delivery-error", "");
+  document.getElementById("delivery-modal").hidden = false;
+  document.getElementById("delivery-password").focus();
+}
+
+async function copyDeliveryUrl(silent) {
+  const url = document.getElementById("delivery-url").value.trim();
+  if (!url) return false;
+  try {
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      await navigator.clipboard.writeText(url);
+    } else {
+      document.getElementById("delivery-url").select();
+      document.execCommand("copy");
+    }
+    if (!silent) {
+      await askNotice({ title: "已复制", text: url, ok: "知道了" });
+    }
+    return true;
+  } catch (err) {
+    document.getElementById("delivery-url").select();
+    if (!silent) {
+      await askNotice({ title: "请手动复制", text: url, ok: "知道了" });
+    }
+    return false;
+  }
+}
+
+document.getElementById("delivery-close").addEventListener("click", closeDelivery);
+document.getElementById("delivery-cancel").addEventListener("click", closeDelivery);
+document.getElementById("delivery-copy").addEventListener("click", () => copyDeliveryUrl(false));
+document.getElementById("delivery-save").addEventListener("click", async () => {
+  showError("delivery-error", "");
+  if (!deliveryUser) {
+    showError("delivery-error", "请选择账号");
+    return;
+  }
+  const password = document.getElementById("delivery-password").value.trim() || "123456";
+  const saveBtn = document.getElementById("delivery-save");
+  saveBtn.disabled = true;
+  saveBtn.textContent = "生成中…";
+  try {
+    const data = await call("/api/admin/users/delivery", {
+      name: deliveryUser,
+      password
+    });
+    const url = data.share_url || "";
+    document.getElementById("delivery-url").value = url;
+    document.getElementById("delivery-path").textContent = data.path
+      ? ("已写入 " + data.path + "。可再点右侧「复制链接」。")
+      : "可再点右侧「复制链接」。";
+    document.getElementById("delivery-result").hidden = false;
+    document.getElementById("delivery-url").select();
+    const copied = await copyDeliveryUrl(true);
+    await askNotice({
+      title: copied ? "已生成并复制" : "已生成",
+      text: url || "分享链接已生成",
+      ok: "知道了"
+    });
+  } catch (err) {
+    showError("delivery-error", err.message || "生成失败");
+  } finally {
+    saveBtn.disabled = false;
+    saveBtn.textContent = "生成";
+  }
+});
+
+document.addEventListener("keydown", (event) => {
+  if (event.key !== "Escape") return;
+  if (!document.getElementById("notice-modal").hidden) closeNotice(false);
+  else if (!document.getElementById("password-modal").hidden) closePassword();
+  else if (!accountMenu.hidden) closeAccountMenu();
+  else if (cookieModal && !cookieModal.hidden) closeCookieModal();
+  else if (!document.getElementById("user-add-modal").hidden) closeUserAdd();
+  else if (!document.getElementById("bind-modal").hidden) closeBind();
+  else if (!document.getElementById("delivery-modal").hidden) closeDelivery();
+  else if (!document.getElementById("saved-modal").hidden) closeSaved();
+});
+
+loadState().catch(() => showAuth("login"));
+</script>
+</body>
+</html>

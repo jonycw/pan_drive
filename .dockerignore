@@ -1,0 +1,8 @@
+target
+.git
+.cursor
+data
+portal.json
+config.json
+quark.cookie
+**/*.pdb

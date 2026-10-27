@@ -1,0 +1,18 @@
+services:
+  quarkdrive:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+    image: quarkdrive-webdav:local
+    container_name: quarkdrive-webdav
+    restart: unless-stopped
+    ports:
+      - "28080:8080"
+    volumes:
+      - ./config.json:/app/config.json:ro
+      - ./data:/app/data
+    networks:
+      - web_public
+networks:
+  web_public:
+    external: true

@@ -1,0 +1,925 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>分享下载</title>
+<style>
+:root {
+  --ink: #14221e;
+  --muted: #5f6f69;
+  --line: #e4ebe7;
+  --paper: #f4f7f5;
+  --card: #fff;
+  --accent: #0f6e56;
+  --accent-dark: #0b5644;
+  --danger: #b42318;
+  --ok: #067647;
+  --shadow: 0 16px 40px rgba(20, 34, 30, 0.08);
+}
+* { margin: 0; padding: 0; box-sizing: border-box; }
+html, body { min-height: 100%; }
+body { font-family: "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif; background: var(--paper); color: var(--ink); line-height: 1.5; }
+button, input, textarea { font: inherit; }
+button, .picker { min-height: 40px; }
+.gate { min-height: 100vh; display: grid; place-items: center; padding: 32px 16px; background: linear-gradient(180deg, #e7f3ee 0%, var(--paper) 280px); }
+.gate-panel { width: min(440px, 100%); background: var(--card); border: 1px solid var(--line); border-radius: 18px; box-shadow: var(--shadow); padding: 32px 28px 28px; }
+.eyebrow { color: var(--accent); font-size: 12px; font-weight: 800; letter-spacing: 0.14em; text-transform: uppercase; }
+.gate-panel h1 { margin: 8px 0 6px; font-size: 28px; letter-spacing: -0.03em; }
+.workspace { min-height: 100vh; }
+.topbar { height: 64px; display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 0 28px; background: #10211c; color: #fff; }
+.who strong { display: block; font-size: 15px; }
+.who span { color: #b7cdc4; font-size: 12px; }
+.workspace-body { max-width: 760px; margin: 0 auto; padding: 24px 16px 48px; }
+.panel { background: var(--card); border: 1px solid var(--line); border-radius: 16px; padding: 22px; }
+.lead, .hint { color: var(--muted); font-size: 13px; }
+.field { margin-top: 14px; }
+.field-label { display: block; font-size: 13px; font-weight: 700; margin-bottom: 6px; }
+input[type="text"], input[type="password"], textarea { width: 100%; border: 1px solid #d5e0db; border-radius: 10px; padding: 10px 12px; background: #fff; color: inherit; }
+textarea { min-height: 150px; resize: vertical; }
+input:focus, textarea:focus, .picker:focus-visible { outline: 3px solid rgba(15, 110, 86, 0.18); border-color: var(--accent); }
+.primary, .solid { background: var(--accent); color: #fff; border: 0; border-radius: 10px; padding: 11px 18px; font-weight: 800; cursor: pointer; }
+.primary:hover, .solid:hover { background: var(--accent-dark); }
+.actions-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-top: 16px; }
+.actions-row .primary, .actions-row .ghost, .solid { margin-top: 0; }
+.primary { margin-top: 16px; }
+.record-btn { position: relative; }
+.record-badge { position: absolute; top: -10px; right: -10px; min-width: 22px; height: 22px; padding: 0 6px; border-radius: 999px; background: #dc2626; color: #fff; font-size: 12px; font-weight: 800; line-height: 22px; text-align: center; box-shadow: 0 0 0 2px #fff; }
+.record { padding: 14px 4px; border-top: 1px solid var(--line); }
+.file-title { font-size: 15px; font-weight: 800; word-break: break-all; }
+.meter { height: 8px; margin-top: 10px; background: #e5eeea; border-radius: 99px; overflow: hidden; }
+.meter-fill { height: 100%; width: 0; background: var(--accent); border-radius: 99px; }
+.record-meta { display: flex; flex-wrap: wrap; gap: 10px 16px; margin-top: 8px; color: var(--muted); font-size: 12px; }
+.record-meta .speed { color: var(--accent-dark); font-weight: 800; }
+.log-body { margin: 0; padding: 16px; word-break: break-word; color: #24332e; font-size: 12px; line-height: 1.6; overflow: auto; background: #f7fbf9; }
+.log-line { white-space: pre-wrap; }
+.log-line.done { color: #067647; font-weight: 800; }
+.log-line.bad { color: #b42318; font-weight: 800; }
+.log-line.ok { color: #0f6e56; }
+.ghost { border: 1px solid #d5e0db; background: #fff; color: var(--ink); border-radius: 10px; padding: 8px 14px; font-weight: 800; cursor: pointer; }
+.topbar .ghost { border-color: rgba(255,255,255,0.24); background: transparent; color: #fff; }
+.picker { width: 100%; border: 1px solid #d5e0db; border-radius: 10px; background: #f8fbf9; color: inherit; padding: 10px 12px; display: flex; align-items: center; justify-content: space-between; gap: 12px; cursor: pointer; text-align: left; }
+.picker-text { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.picker-text.placeholder { color: #8aa097; }
+.picker-go { flex: none; color: var(--accent); font-size: 13px; font-weight: 800; }
+.primary:disabled, .solid:disabled { background: #8fbfb0; cursor: not-allowed; }
+.form-error { margin-top: 10px; color: var(--danger); font-size: 13px; }
+.text-btn { border: 0; background: none; color: var(--accent); cursor: pointer; padding: 0; font-weight: 800; min-height: 0; text-decoration: none; }
+.text-btn:hover { text-decoration: underline; }
+.task { padding: 12px 0; border-top: 1px solid var(--line); }
+.task-top { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
+.link { word-break: break-all; font-size: 14px; }
+.phase { flex: none; display: inline-flex; align-items: center; height: 24px; padding: 0 10px; border-radius: 99px; background: #e5f4ef; color: var(--accent-dark); font-size: 12px; font-weight: 800; }
+.phase.done { background: #dcfae6; color: var(--ok); }
+.phase.fail { background: #fee4e2; color: var(--danger); }
+.phase.cancel { background: #eef2f0; color: var(--muted); }
+.progress { margin-top: 6px; color: #3e524b; font-size: 13px; word-break: break-all; }
+.task-actions { display: flex; gap: 14px; margin-top: 8px; }
+.pick-row { display: flex; align-items: center; gap: 10px; padding: 8px 12px; border-radius: 10px; cursor: pointer; }
+.pick-row:hover { background: #f7fbf9; }
+.pick-row input { width: auto; }
+.alert { margin-top: 8px; color: var(--danger); font-size: 14px; font-weight: 800; }
+.detail { margin-top: 6px; white-space: pre-wrap; word-break: break-word; color: #24332e; font-size: 12px; background: #f7fbf9; border-radius: 8px; padding: 8px 10px; }
+.empty { color: #8aa097; font-size: 13px; margin: 12px 16px; }
+.modal { position: fixed; inset: 0; background: rgba(16, 33, 28, 0.48); display: flex; align-items: center; justify-content: center; padding: 16px; z-index: 20; }
+.dialog { width: min(560px, 100%); max-height: min(640px, 86vh); background: #fff; border-radius: 16px; display: flex; flex-direction: column; overflow: hidden; box-shadow: var(--shadow); }
+.dialog header, .dialog footer { padding: 14px 16px; display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.dialog footer { justify-content: flex-end; border-top: 1px solid var(--line); }
+.dir-list, .file-list { overflow: auto; padding: 8px; min-height: 180px; }
+.dir-row, .file-row { display: flex; align-items: center; gap: 8px; border-radius: 10px; }
+.dir-row:hover, .file-row.dir:hover { background: #f7fbf9; }
+.dir-main, .dir-deeper { border: 0; background: none; cursor: pointer; }
+.file-row { border: 0; background: none; cursor: default; }
+.dir-main { flex: 1; text-align: left; padding: 12px; font-weight: 700; }
+.dir-deeper { color: var(--accent); font-size: 13px; font-weight: 800; padding: 10px 12px; }
+.dialog header { border-bottom: 1px solid var(--line); }
+.dialog h2 { font-size: 16px; }
+.dialog .root { color: var(--muted); font-size: 12px; word-break: break-all; }
+.crumbs { display: flex; flex-wrap: wrap; gap: 4px; padding: 10px 16px 0; font-size: 13px; color: var(--muted); }
+.crumbs button { border: 0; background: none; color: var(--accent); cursor: pointer; padding: 0; font-weight: 800; min-height: 0; }
+.file-row { width: 100%; text-align: left; padding: 10px 12px; justify-content: space-between; }
+.file-row.dir { cursor: pointer; }
+.file-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 700; }
+.file-meta { flex: none; color: var(--muted); font-size: 12px; }
+.dialog-error { padding: 0 16px 8px; color: var(--danger); font-size: 13px; }
+[hidden] { display: none !important; }
+@media (max-width: 640px) {
+  .workspace-body { padding: 12px 12px 32px; }
+  .topbar { padding: 0 14px; }
+  .actions-row .primary { flex: 1; }
+  .modal { align-items: flex-end; padding: 0; }
+  .dialog { width: 100%; max-height: 86vh; border-radius: 16px 16px 0 0; }
+}
+
+</style>
+</head>
+<body>
+<form class="gate" id="login">
+  <div class="gate-panel">
+    <p class="eyebrow">Quark Drive</p>
+    <h1>分享下载</h1>
+    <p class="lead">使用账号密码登录，粘贴一条分享链接，点击开始下载，选择下载的内容，确认后开始下载。</p>
+    <div class="field">
+      <label class="field-label" for="name">账号</label>
+      <input id="name" type="text" autocomplete="username" required>
+    </div>
+    <div class="field">
+      <label class="field-label" for="password">密码</label>
+      <input id="password" type="password" autocomplete="current-password" required>
+    </div>
+    <button class="primary" type="submit">登录</button>
+    <p class="form-error" id="login-error" hidden></p>
+  </div>
+</form>
+<div class="workspace" id="app" hidden>
+  <header class="topbar">
+    <div class="who">
+      <strong id="who-name"></strong>
+      <span id="who-expire"></span>
+    </div>
+    <button type="button" class="ghost" id="logout">退出</button>
+  </header>
+  <main class="workspace-body">
+    <form class="panel" id="form">
+      <span class="field-label">本机保存目录</span>
+      <button type="button" class="picker" id="pick-dir">
+        <span class="picker-text placeholder" id="pick-text">选择本机目录</span>
+        <span class="picker-go">选择</span>
+      </button>
+      <label class="field-label" for="links" style="margin-top:14px">分享链接</label>
+      <textarea id="links" placeholder="一次粘贴一条。可以直接粘贴夸克复制出来的整段内容&#10;链接：https://pan.quark.cn/s/xxxx&#10;提取码：xxxx"></textarea>
+      <p class="hint">一次只解析一条分享。整段文字里的链接和提取码会自动识别。先选择本机保存目录。点开始下载后先勾选文件，确认后才会转存并下载到这个目录。</p>
+      <div class="actions-row">
+        <button class="primary" id="start" type="submit">开始下载</button>
+        <button type="button" class="ghost record-btn" id="open-records">下载记录<span class="record-badge" id="record-badge" hidden>0</span></button>
+      </div>
+      <p class="form-error" id="form-error" hidden></p>
+    </form>
+  </main>
+</div>
+<div class="modal" id="file-modal" hidden>
+  <div class="dialog" role="dialog" aria-modal="true" aria-labelledby="file-title">
+    <header>
+      <div>
+        <h2 id="file-title">文件列表</h2>
+        <div class="root" id="file-root"></div>
+      </div>
+      <button type="button" class="text-btn" id="file-close">关闭</button>
+    </header>
+    <div class="crumbs" id="file-crumbs"></div>
+    <p class="dialog-error" id="file-error" hidden></p>
+    <div class="file-list" id="file-list"></div>
+  </div>
+</div>
+<div class="modal" id="dir-modal" hidden>
+  <div class="dialog" id="dir-dialog" role="dialog" aria-modal="true" aria-labelledby="dir-title">
+    <header>
+      <h2 id="dir-title">选择本机保存目录</h2>
+      <button type="button" class="text-btn" id="dir-close">关闭</button>
+    </header>
+    <div class="crumbs" id="dir-crumbs"></div>
+    <p class="dialog-error" id="dir-error" hidden></p>
+    <div class="dir-list" id="dir-list"></div>
+    <footer>
+      <button type="button" class="ghost" id="dir-cancel">取消</button>
+      <button type="button" class="solid" id="dir-select" hidden>选择此目录</button>
+    </footer>
+  </div>
+</div>
+<div class="modal" id="pick-modal" hidden>
+  <div class="dialog" role="dialog" aria-modal="true" aria-labelledby="pick-title">
+    <header>
+      <div>
+        <h2 id="pick-title">选择文件</h2>
+        <div class="root" id="pick-sub"></div>
+      </div>
+      <button type="button" class="text-btn" id="pick-close">关闭</button>
+    </header>
+    <p class="dialog-error" id="pick-error" hidden></p>
+    <div class="file-list" id="pick-list"></div>
+    <footer>
+      <button type="button" class="ghost" id="pick-all">全选</button>
+      <button type="button" class="ghost" id="pick-cancel">取消</button>
+      <button type="button" class="ghost" id="pick-wait" hidden>等前面的结束</button>
+      <button type="button" class="solid" id="pick-replace" hidden>停掉前面的并下载</button>
+      <button type="button" class="solid" id="pick-go" disabled>下载所选</button>
+    </footer>
+  </div>
+</div>
+<div class="modal" id="record-modal" hidden>
+  <div class="dialog" role="dialog" aria-modal="true" aria-labelledby="record-title">
+    <header>
+      <h2 id="record-title">下载记录</h2>
+      <button type="button" class="text-btn" id="record-close">关闭</button>
+    </header>
+    <div class="file-list" id="tasks"></div>
+    <p class="empty" id="empty">还没有下载记录。</p>
+  </div>
+</div>
+<div class="modal" id="log-modal" hidden style="z-index:30">
+  <div class="dialog" role="dialog" aria-modal="true" aria-labelledby="log-title">
+    <header>
+      <div>
+        <h2 id="log-title">下载详情</h2>
+        <div class="root" id="log-sub"></div>
+      </div>
+      <button type="button" class="text-btn" id="log-close">关闭</button>
+    </header>
+    <div class="log-body" id="log-body"></div>
+  </div>
+</div>
+<script>
+const TOKEN = "@@TOKEN@@";
+const loginForm = document.getElementById("login");
+const loginError = document.getElementById("login-error");
+const app = document.getElementById("app");
+const whoName = document.getElementById("who-name");
+const whoExpire = document.getElementById("who-expire");
+const form = document.getElementById("form");
+const linksInput = document.getElementById("links");
+const formError = document.getElementById("form-error");
+const tasksEl = document.getElementById("tasks");
+const emptyEl = document.getElementById("empty");
+const fileModal = document.getElementById("file-modal");
+const fileRoot = document.getElementById("file-root");
+const fileCrumbs = document.getElementById("file-crumbs");
+const fileList = document.getElementById("file-list");
+const fileError = document.getElementById("file-error");
+let tasks = [];
+let polling = false;
+let filesRoot = "";
+let filesPath = "";
+let filesTimer = 0;
+let filesBusy = false;
+let localDir = "";
+let currentDir = "";
+let pendingText = "";
+let openLogId = 0;
+const recordModal = document.getElementById("record-modal");
+const logModal = document.getElementById("log-modal");
+const recordButton = document.getElementById("open-records");
+const pickModal = document.getElementById("pick-modal");
+const pickList = document.getElementById("pick-list");
+const pickSub = document.getElementById("pick-sub");
+const pickError = document.getElementById("pick-error");
+const pickGo = document.getElementById("pick-go");
+let pickTextValue = "";
+const pickText = document.getElementById("pick-text");
+const dirModal = document.getElementById("dir-modal");
+const dirDialog = document.getElementById("dir-dialog");
+const dirCrumbs = document.getElementById("dir-crumbs");
+const dirList = document.getElementById("dir-list");
+const dirError = document.getElementById("dir-error");
+const dirSelect = document.getElementById("dir-select");
+
+function showError(el, message) {
+  el.hidden = !message;
+  el.textContent = message || "";
+}
+
+async function call(path, body) {
+  const res = await fetch(path, {
+    method: body ? "POST" : "GET",
+    headers: body ? {
+      "Accept": "application/json",
+      "Content-Type": "application/json",
+      "X-Requested-With": TOKEN
+    } : { "Accept": "application/json" },
+    body: body ? JSON.stringify(body) : undefined
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok || data.ok === false) {
+    const error = new Error(data.error || "请求失败");
+    error.status = res.status;
+    error.busy = !!data.busy;
+    throw error;
+  }
+  return data;
+}
+
+function phaseClass(phase) {
+  if (phase === "完成") return "phase done";
+  if (phase === "失败") return "phase fail";
+  if (phase === "已取消") return "phase cancel";
+  return "phase";
+}
+
+function userLogLine(line) {
+  const text = (line || "").trim();
+  return text.startsWith("完成:")
+    || text.startsWith("✓")
+    || text.startsWith("✗")
+    || text.startsWith("失败:")
+    || text.startsWith("待下载")
+    || text.startsWith("没有文件需要下载");
+}
+
+function logLineClass(line) {
+  if (line.startsWith("完成:")) return /失败\s*0([，,]|$)/.test(line) ? "log-line done" : "log-line bad";
+  if (line.startsWith("✗") || line.startsWith("失败:")) return "log-line bad";
+  if (line.startsWith("✓")) return "log-line ok";
+  return "log-line";
+}
+
+function fillLog(task) {
+  document.getElementById("log-title").textContent = task.file_name || "下载详情";
+  document.getElementById("log-sub").textContent = task.phase || "";
+  const body = document.getElementById("log-body");
+  body.textContent = "";
+  const lines = (task.lines || []).map((line) => String(line).trim()).filter(userLogLine);
+  if (!lines.length) {
+    body.textContent = "还没有更多记录";
+    return;
+  }
+  lines.forEach((line) => {
+    const row = document.createElement("div");
+    row.className = logLineClass(line);
+    row.textContent = line;
+    body.append(row);
+  });
+}
+
+function openLog(task) {
+  openLogId = task.id;
+  fillLog(task);
+  logModal.hidden = false;
+}
+
+function closeLog() {
+  logModal.hidden = true;
+  openLogId = 0;
+}
+
+function renderTasks() {
+  const badge = document.getElementById("record-badge");
+  const count = tasks.filter((task) => task.phase === "排队" || task.phase === "下载中").length;
+  badge.hidden = count === 0;
+  badge.textContent = count > 99 ? "99+" : String(count);
+  tasksEl.textContent = "";
+  emptyEl.hidden = tasks.length > 0;
+  tasks.forEach((task) => {
+    const row = document.createElement("div");
+    row.className = "record";
+    const top = document.createElement("div");
+    top.className = "task-top";
+    const title = document.createElement("div");
+    title.className = "file-title";
+    title.textContent = task.file_name || task.progress || "等待开始";
+    const phase = document.createElement("span");
+    phase.className = phaseClass(task.phase);
+    phase.textContent = task.phase || "";
+    top.append(title, phase);
+    row.append(top);
+    const percent = task.phase === "完成" ? 100 : Math.max(0, Math.min(100, Number(task.percent) || 0));
+    if (task.total || task.phase === "下载中" || task.phase === "完成") {
+      const meter = document.createElement("div");
+      meter.className = "meter";
+      const fill = document.createElement("div");
+      fill.className = "meter-fill";
+      fill.style.width = percent + "%";
+      meter.append(fill);
+      row.append(meter);
+    }
+    const meta = document.createElement("div");
+    meta.className = "record-meta";
+    if (task.total) {
+      const size = document.createElement("span");
+      size.textContent = formatSize(task.written) + " / " + formatSize(task.total);
+      meta.append(size);
+    }
+    if (task.speed) {
+      const speed = document.createElement("span");
+      speed.className = "speed";
+      speed.textContent = task.speed;
+      meta.append(speed);
+    }
+    if (task.total || task.phase === "完成") {
+      const pct = document.createElement("span");
+      pct.textContent = percent + "%";
+      meta.append(pct);
+    } else if (task.file_name && task.progress) {
+      const state = document.createElement("span");
+      state.textContent = task.progress;
+      meta.append(state);
+    }
+    if (task.phase === "失败" && task.error_brief) {
+      const alert = document.createElement("span");
+      alert.textContent = task.error_brief;
+      meta.append(alert);
+    }
+    if (meta.childNodes.length) row.append(meta);
+    const actions = document.createElement("div");
+    actions.className = "task-actions";
+    const toggle = document.createElement("button");
+    toggle.type = "button";
+    toggle.className = "text-btn";
+    toggle.textContent = "查看详情";
+    toggle.addEventListener("click", () => openLog(task));
+    actions.append(toggle);
+    if (task.phase === "排队" || task.phase === "下载中") {
+      const cancel = document.createElement("button");
+      cancel.type = "button";
+      cancel.className = "text-btn";
+      cancel.textContent = "取消";
+      cancel.addEventListener("click", () => cancelTask(task.id));
+      actions.append(cancel);
+    }
+    row.append(actions);
+    tasksEl.append(row);
+  });
+  if (openLogId) {
+    const current = tasks.find((task) => task.id === openLogId);
+    if (current) fillLog(current);
+  }
+}
+
+async function cancelTask(id) {
+  showError(formError, "");
+  try {
+    const data = await call("/api/tasks/cancel", { id });
+    tasks = data.tasks || [];
+    renderTasks();
+    if (tasks.some((task) => task.phase === "排队" || task.phase === "下载中")) poll();
+  } catch (err) {
+    showError(formError, err.message || "没有取消");
+    if (err.status === 401) showLogin();
+  }
+}
+
+async function refreshTasks() {
+  const data = await call("/api/tasks");
+  tasks = data.tasks || [];
+  renderTasks();
+  return tasks.some((task) => task.phase === "排队" || task.phase === "下载中");
+}
+
+async function poll() {
+  if (polling) return;
+  polling = true;
+  try {
+    const active = await refreshTasks();
+    if (active) setTimeout(() => { polling = false; poll(); }, 800);
+    else polling = false;
+  } catch (err) {
+    polling = false;
+    if (err.status === 401) showLogin();
+  }
+}
+
+function hideBusyChoice() {
+  document.getElementById("pick-wait").hidden = true;
+  document.getElementById("pick-replace").hidden = true;
+  pickGo.hidden = false;
+}
+
+function showBusyChoice(message) {
+  showError(pickError, message + "。可以等它结束，或停掉前面的再下这个。");
+  document.getElementById("pick-wait").hidden = false;
+  document.getElementById("pick-replace").hidden = false;
+  pickGo.hidden = true;
+}
+
+function closeSharePick() {
+  pickModal.hidden = true;
+  pickTextValue = "";
+  hideBusyChoice();
+}
+
+function selectedPickFids() {
+  return Array.from(pickList.querySelectorAll("input[type=checkbox]:checked")).map((box) => box.value);
+}
+
+function refreshPickGo() {
+  pickGo.disabled = selectedPickFids().length === 0;
+}
+
+async function openSharePick(text) {
+  pickTextValue = text;
+  showError(pickError, "");
+  hideBusyChoice();
+  pickList.textContent = "";
+  pickSub.textContent = "正在读取分享…";
+  pickGo.disabled = true;
+  pickModal.hidden = false;
+  try {
+    const data = await call("/api/preview", { text });
+    const group = (data.groups || [])[0] || {};
+    if (group.error) {
+      pickSub.textContent = "";
+      showError(pickError, group.error);
+      return;
+    }
+    pickSub.textContent = group.title || "";
+    const entries = group.entries || [];
+    if (!entries.length) {
+      showError(pickError, "这个分享里没有文件");
+      return;
+    }
+    entries.forEach((entry) => {
+      const row = document.createElement("label");
+      row.className = "pick-row";
+      const box = document.createElement("input");
+      box.type = "checkbox";
+      box.value = entry.fid || "";
+      box.addEventListener("change", refreshPickGo);
+      const name = document.createElement("span");
+      name.className = "file-name";
+      name.textContent = entry.dir ? ((entry.name || "") + "/") : (entry.name || "");
+      const meta = document.createElement("span");
+      meta.className = "file-meta";
+      meta.textContent = entry.dir ? "文件夹" : formatSize(entry.size);
+      row.append(box, name, meta);
+      pickList.append(row);
+    });
+  } catch (err) {
+    pickSub.textContent = "";
+    showError(pickError, err.message || "无法读取分享");
+    if (err.status === 401) {
+      closeSharePick();
+      showLogin();
+    }
+  }
+}
+
+async function confirmPick(extra) {
+  const fids = selectedPickFids();
+  if (!pickTextValue || !fids.length) return;
+  pickGo.disabled = true;
+  const text = pickTextValue;
+  const picks = {};
+  picks[text] = fids;
+  const body = Object.assign({ text, picks }, extra || {});
+  try {
+    await call("/api/tasks", body);
+    closeSharePick();
+    linksInput.value = "";
+    await refreshTasks();
+    if (tasks.some((task) => task.phase === "排队" || task.phase === "下载中")) poll();
+  } catch (err) {
+    if (err.busy) {
+      showBusyChoice(err.message || "这个账号还有别的下载没完成");
+      return;
+    }
+    showError(pickError, err.message || "没有开始下载");
+    refreshPickGo();
+    if (err.status === 401) {
+      closeSharePick();
+      showLogin();
+    }
+  }
+}
+
+async function beginDownload(text) {
+  showError(formError, "");
+  const value = (text || "").trim();
+  if (!value) {
+    showError(formError, "请粘贴分享链接");
+    return;
+  }
+  if (!localDir) {
+    pendingText = value;
+    openPicker();
+    return;
+  }
+  await openSharePick(value);
+}
+
+function showLogin() {
+  app.hidden = true;
+  loginForm.hidden = false;
+}
+
+function showApp(data) {
+  loginForm.hidden = true;
+  app.hidden = false;
+  whoName.textContent = data.name || "";
+  whoExpire.textContent = data.expires_on ? ("有效期至 " + data.expires_on) : "";
+  showLocalDir(data.download_dir || "");
+  poll();
+}
+
+function showLocalDir(path) {
+  localDir = path || "";
+  pickText.textContent = localDir || "选择本机目录";
+  pickText.classList.toggle("placeholder", !localDir);
+}
+
+function isMobile() {
+  return window.matchMedia("(max-width: 800px)").matches;
+}
+function closeDirModal() {
+  dirModal.hidden = true;
+  pendingText = "";
+}
+async function chooseDir(path) {
+  showError(dirError, "");
+  const pending = pendingText;
+  try {
+    const data = await call("/api/download-dir", { path });
+    showLocalDir(data.download_dir || path);
+    pendingText = "";
+    dirModal.hidden = true;
+    showError(formError, "");
+    if (pending) await openSharePick(pending);
+  } catch (err) {
+    showError(dirError, err.message || "没有保存这个目录");
+  }
+}
+function dirCrumbsFor(path) {
+  const items = [{ name: "此电脑", path: "" }];
+  if (!path) return items;
+  const normalized = String(path).replace(/\//g, "\\");
+  const drive = normalized.match(/^([A-Za-z]:)/);
+  if (!drive) return items;
+  let acc = drive[1] + "\\";
+  items.push({ name: drive[1] + "\\", path: acc });
+  const rest = normalized.slice(drive[1].length).replace(/^\\/, "").replace(/\\$/, "");
+  if (rest) {
+    rest.split("\\").forEach((part) => {
+      acc += part;
+      items.push({ name: part, path: acc });
+      acc += "\\";
+    });
+  }
+  return items;
+}
+function renderDirCrumbs(path) {
+  dirCrumbs.textContent = "";
+  dirCrumbsFor(path).forEach((item, index, items) => {
+    if (index) dirCrumbs.append(" / ");
+    if (index === items.length - 1) {
+      const current = document.createElement("span");
+      current.textContent = item.name;
+      dirCrumbs.append(current);
+    } else {
+      const button = document.createElement("button");
+      button.type = "button";
+      button.textContent = item.name;
+      button.addEventListener("click", () => loadDir(item.path));
+      dirCrumbs.append(button);
+    }
+  });
+}
+function renderDirEntries(data) {
+  currentDir = data.path || "";
+  dirSelect.hidden = !data.can_select;
+  renderDirCrumbs(currentDir);
+  dirList.textContent = "";
+  const mobile = dirDialog.dataset.mode === "mobile";
+  const entries = data.entries || [];
+  if (!entries.length) {
+    const empty = document.createElement("p");
+    empty.className = "empty";
+    empty.textContent = "没有可以进入的子目录";
+    dirList.append(empty);
+    return;
+  }
+  entries.forEach((entry) => {
+    const row = document.createElement("div");
+    row.className = "dir-row";
+    const main = document.createElement("button");
+    main.type = "button";
+    main.className = "dir-main";
+    main.textContent = entry.name;
+    main.addEventListener("click", () => {
+      if (mobile || !entry.exists) chooseDir(entry.path);
+      else loadDir(entry.path);
+    });
+    row.append(main);
+    if (mobile && entry.exists) {
+      const deeper = document.createElement("button");
+      deeper.type = "button";
+      deeper.className = "dir-deeper";
+      deeper.textContent = "下级";
+      deeper.addEventListener("click", () => loadDir(entry.path));
+      row.append(deeper);
+    }
+    dirList.append(row);
+  });
+}
+async function loadDir(path) {
+  showError(dirError, "");
+  dirList.textContent = "";
+  const loading = document.createElement("p");
+  loading.className = "empty";
+  loading.textContent = "正在读取目录…";
+  dirList.append(loading);
+  const url = path ? ("/api/dirs?path=" + encodeURIComponent(path)) : "/api/dirs";
+  try {
+    const data = await call(url);
+    renderDirEntries(data);
+    return true;
+  } catch (err) {
+    dirList.textContent = "";
+    showError(dirError, err.message || "无法读取目录");
+    return false;
+  }
+}
+async function openPicker() {
+  dirDialog.dataset.mode = isMobile() ? "mobile" : "desktop";
+  dirModal.hidden = false;
+  if (!isMobile() && localDir) {
+    if (await loadDir(localDir)) return;
+  }
+  await loadDir("");
+}
+
+loginForm.addEventListener("submit", async (event) => {
+  event.preventDefault();
+  showError(loginError, "");
+  try {
+    const data = await call("/api/login", {
+      name: document.getElementById("name").value.trim(),
+      password: document.getElementById("password").value
+    });
+    showApp(data);
+  } catch (err) {
+    showError(loginError, err.message || "登录失败");
+  }
+});
+
+form.addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const text = linksInput.value.trim();
+  if (!text) {
+    showError(formError, "请粘贴分享链接");
+    return;
+  }
+  await beginDownload(text);
+});
+
+function formatSize(size) {
+  const units = ["B", "KB", "MB", "GB"];
+  let value = Number(size) || 0;
+  let index = 0;
+  while (value >= 1024 && index < units.length - 1) {
+    value /= 1024;
+    index += 1;
+  }
+  const shown = index === 0 ? String(Math.round(value)) : value.toFixed(value >= 10 ? 0 : 1);
+  return shown + " " + units[index];
+}
+
+function closeFiles() {
+  fileModal.hidden = true;
+  clearTimeout(filesTimer);
+}
+
+function renderFileCrumbs() {
+  fileCrumbs.textContent = "";
+  const items = [{ name: filesRoot || "我的文件夹", path: filesRoot }];
+  if (filesRoot && filesPath.startsWith(filesRoot + "/")) {
+    let acc = filesRoot;
+    filesPath.slice(filesRoot.length + 1).split("/").forEach((part) => {
+      acc += "/" + part;
+      items.push({ name: part, path: acc });
+    });
+  }
+  items.forEach((item, index) => {
+    if (index) fileCrumbs.append(" / ");
+    if (index === items.length - 1) {
+      const current = document.createElement("span");
+      current.textContent = item.name;
+      fileCrumbs.append(current);
+    } else {
+      const button = document.createElement("button");
+      button.type = "button";
+      button.textContent = item.name;
+      button.addEventListener("click", () => loadFiles(item.path));
+      fileCrumbs.append(button);
+    }
+  });
+}
+
+function renderFileEntries(entries) {
+  fileList.textContent = "";
+  if (!entries.length) {
+    const empty = document.createElement("p");
+    empty.className = "empty";
+    empty.textContent = "这个文件夹还是空的。转存完成后，文件会出现在这里。";
+    fileList.append(empty);
+    return;
+  }
+  entries.forEach((entry) => {
+    const row = document.createElement("button");
+    row.type = "button";
+    row.className = entry.dir ? "file-row dir" : "file-row";
+    const name = document.createElement("span");
+    name.className = "file-name";
+    name.textContent = entry.dir ? (entry.name + "/") : (entry.name || "");
+    const meta = document.createElement("span");
+    meta.className = "file-meta";
+    meta.textContent = entry.dir ? "文件夹" : formatSize(entry.size);
+    row.append(name, meta);
+    if (entry.dir) {
+      row.addEventListener("click", () => {
+        const next = filesPath.replace(/\/$/, "") + "/" + entry.name;
+        loadFiles(next);
+      });
+    }
+    fileList.append(row);
+  });
+}
+
+async function loadFiles(path) {
+  showError(fileError, "");
+  const url = path ? ("/api/files?path=" + encodeURIComponent(path)) : "/api/files";
+  try {
+    const data = await call(url);
+    filesRoot = data.root || "";
+    filesPath = data.path || filesRoot;
+    fileRoot.textContent = filesRoot;
+    renderFileCrumbs();
+    renderFileEntries(data.entries || []);
+  } catch (err) {
+    if (err.status === 401) {
+      closeFiles();
+      showLogin();
+      return;
+    }
+    showError(fileError, err.message || "无法读取文件列表");
+  }
+}
+
+function openFiles() {
+  fileModal.hidden = false;
+  loadFiles(filesPath && filesPath.startsWith(filesRoot) ? filesPath : "");
+  clearTimeout(filesTimer);
+  const tick = async () => {
+    if (fileModal.hidden) return;
+    const active = tasks.some((task) => task.phase === "排队" || task.phase === "下载中");
+    if (active || filesBusy) await loadFiles(filesPath);
+    const follow = active;
+    filesBusy = active;
+    if (!fileModal.hidden && (follow || filesBusy)) filesTimer = setTimeout(tick, 1500);
+  };
+  filesTimer = setTimeout(tick, 1500);
+}
+
+document.getElementById("file-close").addEventListener("click", closeFiles);
+fileModal.addEventListener("click", (event) => {
+  if (event.target === fileModal) closeFiles();
+});
+document.getElementById("pick-dir").addEventListener("click", openPicker);
+document.getElementById("dir-close").addEventListener("click", closeDirModal);
+document.getElementById("dir-cancel").addEventListener("click", closeDirModal);
+dirSelect.addEventListener("click", () => { if (currentDir) chooseDir(currentDir); });
+dirModal.addEventListener("click", (event) => { if (event.target === dirModal) closeDirModal(); });
+document.getElementById("pick-close").addEventListener("click", closeSharePick);
+document.getElementById("pick-cancel").addEventListener("click", closeSharePick);
+document.getElementById("pick-go").addEventListener("click", () => confirmPick());
+document.getElementById("pick-wait").addEventListener("click", () => confirmPick({ wait: true }));
+document.getElementById("pick-replace").addEventListener("click", () => confirmPick({ replace: true }));
+document.getElementById("pick-all").addEventListener("click", () => {
+  const boxes = Array.from(pickList.querySelectorAll("input[type=checkbox]"));
+  const allOn = boxes.length > 0 && boxes.every((box) => box.checked);
+  boxes.forEach((box) => { box.checked = !allOn; });
+  refreshPickGo();
+});
+pickModal.addEventListener("click", (event) => {
+  if (event.target === pickModal) closeSharePick();
+});
+function closeRecords() {
+  recordModal.hidden = true;
+  closeLog();
+}
+recordButton.addEventListener("click", async () => {
+  recordModal.hidden = false;
+  try {
+    await refreshTasks();
+  } catch (err) {
+    if (err.status === 401) showLogin();
+  }
+});
+document.getElementById("record-close").addEventListener("click", closeRecords);
+recordModal.addEventListener("click", (event) => {
+  if (event.target === recordModal) closeRecords();
+});
+document.getElementById("log-close").addEventListener("click", closeLog);
+logModal.addEventListener("click", (event) => {
+  if (event.target === logModal) closeLog();
+});
+document.addEventListener("keydown", (event) => {
+  if (event.key !== "Escape") return;
+  if (!logModal.hidden) closeLog();
+  else if (!recordModal.hidden) closeRecords();
+  else if (!pickModal.hidden) closeSharePick();
+  else if (!dirModal.hidden) closeDirModal();
+  else if (!fileModal.hidden) closeFiles();
+});
+
+document.getElementById("logout").addEventListener("click", async () => {
+  try { await call("/api/logout", {}); } catch (err) {}
+  tasks = [];
+  renderTasks();
+  closeFiles();
+  closeDirModal();
+  closeSharePick();
+  closeRecords();
+  showLogin();
+});
+
+call("/api/session").then(showApp).catch(() => showLogin());
+</script>
+</body>
+</html>
