@@ -1,0 +1,17 @@
+# 生产/反代场景示例：应用挂到已有外部网络（如 Traefik 的 web_public）。
+# 用法：复制为 docker-compose.override.yml 或单独
+#   docker compose -f docker-compose.yml -f docker-compose.prod.example.yml up -d
+#
+# 使用前请先准备好 config.json（database.host 填 mysql 服务名或实际地址）。
+
+services:
+  quarkdrive:
+    ports:
+      - "28080:8080"
+    networks:
+      - default
+      - web_public
+
+networks:
+  web_public:
+    external: true

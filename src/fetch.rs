@@ -82,6 +82,10 @@ pub trait FetchReport: Send + Sync {
         let _ = path;
     }
     fn file(&self, name: &str, written: u64, total: u64, state: &str);
+    /// Files ready on the drive (rel path, fid, size). Used by browser-save mode.
+    fn ready_files(&self, files: &[(String, String, u64)]) {
+        let _ = files;
+    }
     fn cancelled(&self) -> bool {
         false
     }
@@ -240,17 +244,7 @@ pub async fn run_with_report(
         report.log("无需再次转存");
     }
 
-    let Some(root) = download_to else {
-        report.log(&format!("已写入网盘 {dest_path}，共 {} 项", nodes.len()));
-        for node in nodes.iter().take(30) {
-            let suffix = if node.is_dir { "/" } else { "" };
-            report.log(&format!("  {}{suffix}", node.name));
-        }
-        return Ok(());
-    };
-
     stop_if_cancelled(report.as_ref())?;
-    report.phase("下载");
     let jobs = dedup_jobs(collect_jobs(drive, nodes).await?);
     let mut dirs = Vec::new();
     let mut files = Vec::new();
@@ -260,6 +254,43 @@ pub async fn run_with_report(
             Job::File { rel, fid, size } => files.push(FileJob { rel, fid, size }),
         }
     }
+    let ready: Vec<(String, String, u64)> = files
+        .iter()
+        .map(|file| {
+            (
+                file.rel.to_string_lossy().replace('\\', "/"),
+                file.fid.clone(),
+                file.size,
+            )
+        })
+        .collect();
+    report.ready_files(&ready);
+
+    let Some(root) = download_to else {
+        report.log(&format!("已写入网盘 {dest_path}，共 {} 项", dirs.len() + files.len()));
+        for file in files.iter().take(30) {
+            report.log(&format!(
+                "  {}  {}",
+                file.rel.display(),
+                fmt_size(file.size)
+            ));
+        }
+        if files.len() > 30 {
+            report.log(&format!("  ... 还有 {} 个文件", files.len() - 30));
+        }
+        if files.is_empty() {
+            report.log("没有文件需要下载（只有空目录）");
+        } else {
+            report.log(&format!(
+                "待下载 {} 个文件，请在页面点「保存到本机」",
+                files.len()
+            ));
+        }
+        return Ok(());
+    };
+
+    stop_if_cancelled(report.as_ref())?;
+    report.phase("下载");
 
     tokio::fs::create_dir_all(&root)
         .await

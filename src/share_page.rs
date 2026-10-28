@@ -21,6 +21,7 @@ use crate::portal::{self, Portal, Role};
 const REQUESTED_WITH: &str = "quark-share";
 const MAX_BODY: usize = 64 * 1024;
 const MAX_LOG_LINES: usize = 120;
+const READY_PREFIX: &str = "\u{0001}READY:";
 
 pub struct ShareHub {
     drive: QuarkDrive,
@@ -29,6 +30,13 @@ pub struct ShareHub {
     queue: Arc<Mutex<VecDeque<u64>>>,
     next_id: AtomicU64,
     worker_started: std::sync::atomic::AtomicBool,
+}
+
+#[derive(Clone)]
+struct ReadyFile {
+    rel: String,
+    fid: String,
+    size: u64,
 }
 
 struct DownloadTask {
@@ -46,6 +54,7 @@ struct DownloadTask {
     total: u64,
     error: Option<String>,
     lines: VecDeque<String>,
+    ready_files: Vec<ReadyFile>,
     cancel: Arc<AtomicBool>,
     counted: bool,
     last_saved: Instant,
@@ -190,6 +199,14 @@ impl ShareHub {
         if method == Method::GET && path == "/api/files" {
             return self.user_files(&req, req.uri().query()).await;
         }
+        if method == Method::GET && path == "/api/browser-files" {
+            return self.browser_files_list(self.user_name(&req).as_deref());
+        }
+        if method == Method::GET && path == "/api/browser-files/raw" {
+            return self
+                .browser_file_raw(self.user_name(&req).as_deref(), req.uri().query())
+                .await;
+        }
         if method == Method::GET && path == "/api/admin/state" {
             return self.admin_state(&req);
         }
@@ -252,9 +269,7 @@ impl ShareHub {
             "/api/admin/users/delete" => self.admin_delete_user(is_admin, &body),
             "/api/admin/users/expiry" => self.admin_update_expiry(is_admin, &body),
             "/api/admin/users/bind" => self.admin_bind_user(is_admin, &body),
-            "/api/admin/users/delivery" => {
-                self.admin_delivery_link(is_admin, &body, &login_base).await
-            }
+            "/api/admin/users/delivery" => self.admin_delivery_link(is_admin, &body, &login_base),
             "/api/admin/cookies" => self.admin_add_cookie(is_admin, &body),
             "/api/admin/cookies/update" => self.admin_update_cookie(is_admin, &body),
             "/api/admin/cookies/delete" => self.admin_delete_cookie(is_admin, &body),
@@ -262,7 +277,8 @@ impl ShareHub {
             "/api/admin/drive/delete" => self.admin_drive_delete(is_admin, &body).await,
             _ => json_error(404, "没有这个接口"),
         };
-        if is_admin && path != "/api/admin/logout" {
+        // Don't refresh admin cookie on user login/logout — insert() would overwrite Set-Cookie: qd_user.
+        if is_admin && path != "/api/admin/logout" && path != "/api/login" && path != "/api/logout" {
             self.stamp_admin(admin_token.as_deref(), response)
         } else {
             response
@@ -275,9 +291,17 @@ impl ShareHub {
         };
         let expires_on = self.portal.user_expiry_label(&name).unwrap_or_default();
         let download_dir = self.portal.user_download_dir(&name);
+        let browser = download_dir == portal::Portal::BROWSER_DIR_MARK;
         let mut response = json_response(
             200,
-            serde_json::json!({"ok": true, "role": "user", "name": name, "expires_on": expires_on, "download_dir": download_dir}),
+            serde_json::json!({
+                "ok": true,
+                "role": "user",
+                "name": name,
+                "expires_on": expires_on,
+                "download_dir": download_dir,
+                "browser": browser,
+            }),
         );
         if let Some(expires_at) = self.portal.user_expires_at(&name) {
             refresh_user_cookie(&mut response, req, expires_at);
@@ -304,10 +328,115 @@ impl ShareHub {
             return json_error(401, "请先登录");
         };
         let path = body.get("path").and_then(|value| value.as_str()).unwrap_or("");
+        let label = body
+            .get("label")
+            .and_then(|value| value.as_str())
+            .unwrap_or("")
+            .trim();
         match self.portal.set_user_download_dir(owner, path) {
-            Ok(download_dir) => json_response(200, serde_json::json!({"ok": true, "download_dir": download_dir})),
+            Ok(download_dir) => {
+                let browser = download_dir == portal::Portal::BROWSER_DIR_MARK;
+                json_response(
+                    200,
+                    serde_json::json!({
+                        "ok": true,
+                        "download_dir": download_dir,
+                        "browser": browser,
+                        "label": if browser {
+                            if label.is_empty() { "本机文件夹" } else { label }
+                        } else {
+                            download_dir.as_str()
+                        },
+                    }),
+                )
+            }
             Err(message) => json_error(400, &message),
         }
+    }
+
+    fn browser_files_list(&self, owner: Option<&str>) -> Response<Body> {
+        let Some(owner) = owner else {
+            return json_error(401, "请先登录");
+        };
+        if !self.portal.is_browser_download(owner) {
+            return json_response(200, serde_json::json!({"ok": true, "files": []}));
+        }
+        let mut files = Vec::new();
+        let mut seen = std::collections::HashSet::new();
+        let tasks = lock_tasks(&self.tasks);
+        for task in tasks.iter().filter(|task| task.owner == owner && task.phase == "完成") {
+            for file in &task.ready_files {
+                if !seen.insert(file.fid.clone()) {
+                    continue;
+                }
+                files.push(serde_json::json!({
+                    "rel": file.rel,
+                    "fid": file.fid,
+                    "size": file.size,
+                }));
+            }
+        }
+        files.sort_by(|left, right| {
+            let left_rel = left.get("rel").and_then(|v| v.as_str()).unwrap_or("");
+            let right_rel = right.get("rel").and_then(|v| v.as_str()).unwrap_or("");
+            left_rel.cmp(right_rel)
+        });
+        json_response(200, serde_json::json!({"ok": true, "files": files}))
+    }
+
+    async fn browser_file_raw(&self, owner: Option<&str>, query: Option<&str>) -> Response<Body> {
+        let Some(owner) = owner else {
+            return json_error(401, "请先登录");
+        };
+        if !self.portal.is_browser_download(owner) {
+            return json_error(400, "当前不是浏览器本机保存模式");
+        }
+        let fid = query_value(query, "fid").unwrap_or_default();
+        if fid.is_empty() {
+            return json_error(400, "缺少文件");
+        }
+        let ready = {
+            let tasks = lock_tasks(&self.tasks);
+            tasks
+                .iter()
+                .filter(|task| task.owner == owner)
+                .flat_map(|task| task.ready_files.iter())
+                .find(|file| file.fid == fid)
+                .cloned()
+        };
+        let Some(ready) = ready else {
+            return json_error(404, "文件不存在或已过期");
+        };
+        let choice = match self.portal.cookie_for_user(owner) {
+            Ok(choice) => choice,
+            Err(message) => return json_error(400, &message),
+        };
+        if let Err(message) = apply_cookie_choice(&self.drive, &choice) {
+            return json_error(400, &message);
+        }
+        let response = match self.drive.stream_download(&ready.fid).await {
+            Ok(response) => response,
+            Err(err) => return json_error(502, &brief_error(&format!("{err:#}"))),
+        };
+        let bytes = match response.bytes().await {
+            Ok(bytes) => bytes,
+            Err(err) => return json_error(502, &format!("读取网盘文件失败: {err}")),
+        };
+        let name = ready
+            .rel
+            .rsplit('/')
+            .next()
+            .filter(|value| !value.is_empty())
+            .unwrap_or("download");
+        let disposition = format!("attachment; filename*=UTF-8''{}", encode_path_seg(name));
+        Response::builder()
+            .status(200)
+            .header(hyper::header::CONTENT_TYPE, "application/octet-stream")
+            .header(hyper::header::CONTENT_DISPOSITION, disposition)
+            .header(hyper::header::CONTENT_LENGTH, bytes.len())
+            .header(hyper::header::CACHE_CONTROL, "no-store")
+            .body(Body::from(bytes))
+            .unwrap_or_else(|_| text_response(500, "响应失败"))
     }
 
     fn enqueue_for(&self, owner: Option<&str>, body: &serde_json::Value) -> Response<Body> {
@@ -364,6 +493,7 @@ impl ShareHub {
             Ok((token, expires_on)) => {
                 self.portal.log_op(name.trim(), "登录", "登录成功", true);
                 let download_dir = self.portal.user_download_dir(name.trim());
+                let browser = download_dir == portal::Portal::BROWSER_DIR_MARK;
                 let mut response = json_response(
                     200,
                     serde_json::json!({
@@ -371,6 +501,7 @@ impl ShareHub {
                         "name": name.trim(),
                         "expires_on": expires_on,
                         "download_dir": download_dir,
+                        "browser": browser,
                     }),
                 );
                 if let Some(expires_at) = self.portal.user_expires_at(name.trim()) {
@@ -740,7 +871,7 @@ impl ShareHub {
         }
     }
 
-    async fn admin_delivery_link(
+    fn admin_delivery_link(
         &self,
         is_admin: bool,
         body: &serde_json::Value,
@@ -774,21 +905,6 @@ impl ShareHub {
         if let Err(message) = self.portal.reset_user_password(name, password) {
             return json_error(400, &message);
         }
-        let choice = match self.use_admin_cookie() {
-            Ok(choice) => choice,
-            Err(message) => return json_error(400, &message),
-        };
-        let settings = self.portal.settings();
-        let folder = match user_cloud_path(&settings, name) {
-            Ok(path) => path,
-            Err(message) => return json_error(400, &message),
-        };
-        let (parent_fid, built) = match self.drive.ensure_dir_path(&folder).await {
-            Ok(found) => found,
-            Err(err) => {
-                return json_error(400, &self.note_drive_failure(&choice, format!("{err:#}")))
-            }
-        };
         let login_url = body
             .get("login_url")
             .and_then(|value| value.as_str())
@@ -802,38 +918,16 @@ impl ShareHub {
                     format!("{}/share", login_base.trim_end_matches('/'))
                 }
             });
-        let content = format!(
-            "登录地址：{login_url}\n账号：{name}\n密码：{password}\n有效期：{expires_on}\n"
+        let delivery_text = format!(
+            "登录地址：{login_url}\n账号：{name}\n密码：{password}\n有效期：{expires_on}"
         );
-        let fid = match self
-            .drive
-            .replace_file_bytes(&parent_fid, "desc.txt", content.as_bytes())
-            .await
-        {
-            Ok(fid) => fid,
-            Err(err) => {
-                return json_error(400, &self.note_drive_failure(&choice, format!("{err:#}")))
-            }
-        };
-        let share_url = match self.drive.create_public_share(&fid, &format!("{name}-账号信息")).await
-        {
-            Ok(url) => url,
-            Err(err) => {
-                return json_error(400, &self.note_drive_failure(&choice, format!("{err:#}")))
-            }
-        };
-        self.portal.log_op(
-            "管理端",
-            "生成交付链接",
-            &format!("{built}/desc.txt"),
-            true,
-        );
+        self.portal
+            .log_op("管理端", "生成交付图片", name, true);
         json_response(
             200,
             serde_json::json!({
                 "ok": true,
-                "share_url": share_url,
-                "path": format!("{built}/desc.txt"),
+                "delivery_text": delivery_text,
                 "login_url": login_url,
                 "name": name,
                 "password": password,
@@ -1209,6 +1303,7 @@ impl ShareHub {
             total: 0,
             error: error.clone(),
             lines: VecDeque::new(),
+            ready_files: Vec::new(),
             cancel: Arc::new(AtomicBool::new(false)),
             counted,
             last_saved: Instant::now(),
@@ -1365,6 +1460,8 @@ fn is_api_path(path: &str) -> bool {
             | "/api/files"
             | "/api/preview"
             | "/api/download-dir"
+            | "/api/browser-files"
+            | "/api/browser-files/raw"
             | "/api/admin/users/expiry"
             | "/api/admin/login"
             | "/api/admin/logout"
@@ -1444,6 +1541,10 @@ fn build_args(body: &StartBody) -> Result<FetchArgs, String> {
         force_save: body.force_save,
         only_fids: Vec::new(),
     })
+}
+
+fn encode_path_seg(name: &str) -> String {
+    percent_encoding::utf8_percent_encode(name, percent_encoding::NON_ALPHANUMERIC).to_string()
 }
 
 fn suggest_download_dir() -> String {
@@ -1545,8 +1646,7 @@ fn spawn_worker(
                 )
             };
             let settings = portal.settings();
-            let download_dir = portal.user_download_dir(&owner);
-            let mut args = match task_fetch_args(&raw, &settings, &owner, &download_dir) {
+            let mut args = match task_fetch_args(&portal, &raw, &settings, &owner) {
                 Ok(args) => args,
                 Err(message) => {
                     finish_task(&portal, &tasks, id, Err(message));
@@ -1699,19 +1799,23 @@ fn path_under(root: &str, requested: &str) -> Result<String, String> {
 }
 
 fn task_fetch_args(
+    portal: &Portal,
     raw: &str,
     settings: &portal::Settings,
     owner: &str,
-    download_dir: &str,
 ) -> Result<FetchArgs, String> {
     fetch::parse_share_input(raw, "").map_err(|err| brief_error(&format!("{err:#}")))?;
-    let download = download_dir.trim();
-    if download.is_empty() {
+    let browser = portal.is_browser_download(owner);
+    let download = if browser {
+        None
+    } else {
+        Some(portal.resolve_download_dir(owner)?)
+    };
+    if !browser && download.is_none() {
         return Err("请先选择本机保存目录".to_string());
     }
-    let path = PathBuf::from(download);
-    if !path.is_absolute() {
-        return Err("本机目录请选择绝对路径".to_string());
+    if portal.user_download_dir(owner).trim().is_empty() {
+        return Err("请先选择本机保存目录".to_string());
     }
     let to = user_cloud_path(settings, owner)?;
     let jobs = if settings.jobs == 0 {
@@ -1723,15 +1827,37 @@ fn task_fetch_args(
         url: raw.to_string(),
         pwd: String::new(),
         to,
-        download: Some(path),
+        download,
         jobs,
-        cloud_only: false,
+        cloud_only: browser,
         force_save: false,
         only_fids: Vec::new(),
     })
 }
 
 fn record_of(task: &DownloadTask) -> crate::meta::DownloadRecord {
+    let mut lines: Vec<String> = task
+        .lines
+        .iter()
+        .filter(|line| !line.starts_with(READY_PREFIX))
+        .cloned()
+        .collect();
+    if !task.ready_files.is_empty() {
+        let payload: Vec<serde_json::Value> = task
+            .ready_files
+            .iter()
+            .map(|file| {
+                serde_json::json!({
+                    "rel": file.rel,
+                    "fid": file.fid,
+                    "size": file.size,
+                })
+            })
+            .collect();
+        if let Ok(json) = serde_json::to_string(&payload) {
+            lines.push(format!("{READY_PREFIX}{json}"));
+        }
+    }
     crate::meta::DownloadRecord {
         id: task.id,
         owner: task.owner.clone(),
@@ -1746,8 +1872,56 @@ fn record_of(task: &DownloadTask) -> crate::meta::DownloadRecord {
         written: task.written,
         total: task.total,
         error: task.error.clone(),
-        lines: task.lines.iter().cloned().collect(),
+        lines,
         counted: task.counted,
+    }
+}
+
+fn parse_ready_files(lines: &[String]) -> Vec<ReadyFile> {
+    for line in lines {
+        let Some(json) = line.strip_prefix(READY_PREFIX) else {
+            continue;
+        };
+        let Ok(values) = serde_json::from_str::<Vec<serde_json::Value>>(json) else {
+            continue;
+        };
+        return values
+            .into_iter()
+            .filter_map(|value| {
+                Some(ReadyFile {
+                    rel: value.get("rel")?.as_str()?.to_string(),
+                    fid: value.get("fid")?.as_str()?.to_string(),
+                    size: value.get("size")?.as_u64().unwrap_or(0),
+                })
+            })
+            .collect();
+    }
+    Vec::new()
+}
+
+fn store_ready_files(task: &mut DownloadTask, files: &[(String, String, u64)]) {
+    task.ready_files = files
+        .iter()
+        .map(|(rel, fid, size)| ReadyFile {
+            rel: rel.clone(),
+            fid: fid.clone(),
+            size: *size,
+        })
+        .collect();
+    let total: u64 = task.ready_files.iter().map(|file| file.size).sum();
+    task.total = total;
+    task.written = total;
+    task.percent = if task.ready_files.is_empty() { 0 } else { 100 };
+    if let Some(first) = task.ready_files.first() {
+        task.file_name = first
+            .rel
+            .rsplit('/')
+            .next()
+            .unwrap_or(first.rel.as_str())
+            .to_string();
+    }
+    if !task.ready_files.is_empty() {
+        task.progress = format!("待保存到本机（{} 个文件）", task.ready_files.len());
     }
 }
 
@@ -1772,6 +1946,12 @@ fn task_from_record(portal: &Portal, mut record: crate::meta::DownloadRecord) ->
         }
         portal.save_download(&record);
     }
+    let ready_files = parse_ready_files(&record.lines);
+    let lines: VecDeque<String> = record
+        .lines
+        .into_iter()
+        .filter(|line| !line.starts_with(READY_PREFIX))
+        .collect();
     DownloadTask {
         id: record.id,
         owner: record.owner,
@@ -1786,7 +1966,8 @@ fn task_from_record(portal: &Portal, mut record: crate::meta::DownloadRecord) ->
         written: record.written,
         total: record.total,
         error: record.error,
-        lines: VecDeque::from(record.lines),
+        lines,
+        ready_files,
         cancel: Arc::new(AtomicBool::new(false)),
         counted: record.counted,
         last_saved: Instant::now(),
@@ -1808,7 +1989,13 @@ fn finish_task(portal: &Portal, tasks: &Mutex<Vec<DownloadTask>>, id: u64, resul
                 Ok(()) => {
                     task.phase = "完成".to_string();
                     task.error = None;
-                    if task.progress.is_empty() {
+                    if !task.ready_files.is_empty()
+                        && (task.progress.is_empty() || task.progress == "完成")
+                    {
+                        task.progress =
+                            format!("待保存到本机（{} 个文件）", task.ready_files.len());
+                        task.percent = 100;
+                    } else if task.progress.is_empty() {
                         task.progress = "完成".to_string();
                     }
                 }
@@ -1864,6 +2051,14 @@ impl FetchReport for TaskReport {
 
     fn cancelled(&self) -> bool {
         self.cancel.load(Ordering::Relaxed)
+    }
+
+    fn ready_files(&self, files: &[(String, String, u64)]) {
+        let mut tasks = lock_tasks(&self.tasks);
+        if let Some(task) = tasks.iter_mut().find(|task| task.id == self.id) {
+            store_ready_files(task, files);
+            save_task(&self.portal, task, true);
+        }
     }
 
     fn file(&self, name: &str, written: u64, total: u64, kind: &str) {
@@ -1935,7 +2130,12 @@ fn user_log_line(line: &str) -> bool {
 }
 
 fn task_snapshot(task: &DownloadTask) -> serde_json::Value {
-    let lines: Vec<&str> = task.lines.iter().map(String::as_str).collect();
+    let lines: Vec<&str> = task
+        .lines
+        .iter()
+        .filter(|line| !line.starts_with(READY_PREFIX))
+        .map(String::as_str)
+        .collect();
     serde_json::json!({
         "id": task.id,
         "raw": task.raw,
@@ -1949,6 +2149,7 @@ fn task_snapshot(task: &DownloadTask) -> serde_json::Value {
         "speed": task.speed,
         "written": task.written,
         "total": task.total,
+        "ready_count": task.ready_files.len(),
     })
 }
 
@@ -2020,7 +2221,8 @@ fn cookie_from(req: &Request<hyper::body::Incoming>, name: &str) -> Option<Strin
 fn set_cookie(response: &mut Response<Body>, name: &str, token: &str, max_age: u64) {
     let value = format!("{name}={token}; HttpOnly; SameSite=Lax; Path=/; Max-Age={max_age}");
     if let Ok(header) = hyper::header::HeaderValue::from_str(&value) {
-        response.headers_mut().insert(hyper::header::SET_COOKIE, header);
+        // append: never replace another Set-Cookie (e.g. qd_user + qd_admin together)
+        response.headers_mut().append(hyper::header::SET_COOKIE, header);
     }
 }
 
@@ -2053,7 +2255,7 @@ fn selected_fids(picks: &serde_json::Value, line: &str) -> Vec<String> {
 fn clear_cookie(response: &mut Response<Body>, name: &str) {
     let value = format!("{name}=; HttpOnly; SameSite=Lax; Path=/; Max-Age=0");
     if let Ok(header) = hyper::header::HeaderValue::from_str(&value) {
-        response.headers_mut().insert(hyper::header::SET_COOKIE, header);
+        response.headers_mut().append(hyper::header::SET_COOKIE, header);
     }
 }
 
@@ -2399,8 +2601,9 @@ mod tests {
         assert!(admin.contains("/api/admin/users/delivery"));
         assert!(admin.contains("id=\"bind-expire\""));
         assert!(admin.contains("编辑账号"));
-        assert!(admin.contains("生成链接"));
+        assert!(admin.contains("生成图片"));
         assert!(admin.contains("id=\"delivery-modal\""));
+        assert!(admin.contains("id=\"delivery-preview\""));
         assert!(admin.contains("/api/admin/users/expiry"));
         assert!(admin.contains("id=\"shell\""));
         assert!(admin.contains("id=\"gate-title\""));
@@ -2559,17 +2762,30 @@ mod tests {
             download_dir: String::new(),
             jobs: 3,
         };
-        let err = task_fetch_args("https://pan.quark.cn/s/Ab12Cd", &settings, "alice", "").unwrap_err();
+        let portal_dir = std::env::temp_dir().join(format!("qd-portal-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&portal_dir);
+        let portal = Portal::open(portal_dir.join("portal.json"));
+        portal
+            .add_user("alice", "secret1", "2099-01-01", "", 2)
+            .unwrap();
+        let err = task_fetch_args(&portal, "https://pan.quark.cn/s/Ab12Cd", &settings, "alice")
+            .unwrap_err();
         assert!(err.contains("请先选择本机保存目录"));
-        let saved = task_fetch_args(
-            "https://pan.quark.cn/s/Ab12Cd",
-            &settings,
-            "alice",
-            std::env::temp_dir().to_str().unwrap(),
-        )
-        .unwrap();
+        portal
+            .set_user_download_dir("alice", std::env::temp_dir().to_str().unwrap())
+            .unwrap();
+        let saved =
+            task_fetch_args(&portal, "https://pan.quark.cn/s/Ab12Cd", &settings, "alice").unwrap();
         assert_eq!(saved.to, "/来自分享/alice");
         assert_eq!(saved.download.unwrap(), std::env::temp_dir());
+        assert!(!saved.cloud_only);
+        portal
+            .set_user_download_dir("alice", portal::Portal::BROWSER_DIR_MARK)
+            .unwrap();
+        let browser =
+            task_fetch_args(&portal, "https://pan.quark.cn/s/Ab12Cd", &settings, "alice").unwrap();
+        assert!(browser.cloud_only);
+        assert!(browser.download.is_none());
         assert_eq!(user_cloud_path(&settings, "alice").unwrap(), "/来自分享/alice");
         let custom = portal::Settings {
             cloud_dir: "/电影".to_string(),

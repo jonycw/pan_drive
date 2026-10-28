@@ -101,6 +101,9 @@ tbody tr:hover { background: #f7fbf9; }
 #notice-modal { z-index: 30; }
 .dialog { width: min(480px, 100%); max-height: min(640px, 86vh); background: #fff; border-radius: 16px; display: flex; flex-direction: column; overflow: hidden; box-shadow: var(--shadow); }
 .cookie-dialog { width: min(680px, 100%); }
+.delivery-dialog { width: min(520px, 100%); max-height: min(860px, 92vh); }
+.delivery-preview-wrap { margin-top: 4px; padding: 12px; border: 1px solid var(--line); border-radius: 12px; background: #f4f7f5; text-align: center; }
+.delivery-preview-wrap img { max-width: 100%; height: auto; border-radius: 8px; box-shadow: 0 8px 24px rgba(16, 33, 28, 0.12); }
 .cookie-form { padding: 16px; overflow: auto; }
 .cookie-form .field + .field { margin-top: 12px; }
 .dialog header, .dialog footer { padding: 14px 16px; display: flex; align-items: center; justify-content: space-between; gap: 12px; }
@@ -420,9 +423,9 @@ tbody tr:hover { background: #f7fbf9; }
   </div>
 </div>
 <div class="modal" id="delivery-modal" hidden>
-  <div class="dialog" role="dialog" aria-modal="true" aria-labelledby="delivery-title">
+  <div class="dialog delivery-dialog" role="dialog" aria-modal="true" aria-labelledby="delivery-title">
     <header>
-      <h2 id="delivery-title">生成交付链接</h2>
+      <h2 id="delivery-title">生成登录信息图片</h2>
       <button type="button" class="text-btn" id="delivery-close">关闭</button>
     </header>
     <div class="cookie-form">
@@ -430,13 +433,12 @@ tbody tr:hover { background: #f7fbf9; }
       <div class="field">
         <label class="field-label" for="delivery-password">交付密码</label>
         <input id="delivery-password" type="text" autocomplete="off" value="123456">
-        <p class="hint">会写入网盘目录下的 desc.txt，并同步重置该账号密码。然后生成无提取码分享链接。</p>
+        <p class="hint">会同步重置该账号密码，并生成可预览、可下载的登录信息图片，方便发给对方。</p>
       </div>
       <div class="field" id="delivery-result" hidden>
-        <label class="field-label" for="delivery-url">分享链接</label>
-        <div style="display:flex; gap:8px; align-items:center;">
-          <input id="delivery-url" type="text" readonly style="flex:1; min-width:0;">
-          <button type="button" class="solid" id="delivery-copy" style="flex:none; white-space:nowrap;">复制链接</button>
+        <label class="field-label">图片预览</label>
+        <div class="delivery-preview-wrap">
+          <img id="delivery-preview" alt="登录信息预览">
         </div>
         <p class="hint" id="delivery-path"></p>
       </div>
@@ -444,7 +446,8 @@ tbody tr:hover { background: #f7fbf9; }
     </div>
     <footer>
       <button type="button" class="ghost" id="delivery-cancel">关闭</button>
-      <button type="button" class="solid" id="delivery-save">生成</button>
+      <button type="button" class="ghost" id="delivery-download" hidden>下载图片</button>
+      <button type="button" class="solid" id="delivery-save">生成图片</button>
     </footer>
   </div>
 </div>
@@ -938,7 +941,7 @@ function drawUserPage() {
     const delivery = document.createElement("button");
     delivery.type = "button";
     delivery.className = "text-btn";
-    delivery.textContent = "生成链接";
+    delivery.textContent = "生成图片";
     delivery.style.marginRight = "10px";
     delivery.addEventListener("click", () => openDelivery(user));
     const button = document.createElement("button");
@@ -1368,58 +1371,182 @@ document.getElementById("bind-save").addEventListener("click", async () => {
 });
 
 let deliveryUser = "";
+let deliveryBlobUrl = "";
+let deliveryFileName = "账号信息.png";
+
+function revokeDeliveryBlob() {
+  if (deliveryBlobUrl) {
+    URL.revokeObjectURL(deliveryBlobUrl);
+    deliveryBlobUrl = "";
+  }
+}
 
 function closeDelivery() {
   document.getElementById("delivery-modal").hidden = true;
   deliveryUser = "";
   showError("delivery-error", "");
   document.getElementById("delivery-result").hidden = true;
-  document.getElementById("delivery-url").value = "";
+  document.getElementById("delivery-download").hidden = true;
   document.getElementById("delivery-path").textContent = "";
+  document.getElementById("delivery-preview").removeAttribute("src");
   document.getElementById("delivery-save").disabled = false;
-  document.getElementById("delivery-save").textContent = "生成";
+  document.getElementById("delivery-save").textContent = "生成图片";
+  revokeDeliveryBlob();
 }
 
 function openDelivery(user) {
   deliveryUser = user.name || "";
+  deliveryFileName = deliveryUser + "-账号信息.png";
   document.getElementById("delivery-name").textContent = "账号 " + deliveryUser;
   document.getElementById("delivery-password").value = "123456";
   document.getElementById("delivery-result").hidden = true;
-  document.getElementById("delivery-url").value = "";
+  document.getElementById("delivery-download").hidden = true;
   document.getElementById("delivery-path").textContent = "";
+  document.getElementById("delivery-preview").removeAttribute("src");
   document.getElementById("delivery-save").disabled = false;
-  document.getElementById("delivery-save").textContent = "生成";
+  document.getElementById("delivery-save").textContent = "生成图片";
   showError("delivery-error", "");
+  revokeDeliveryBlob();
   document.getElementById("delivery-modal").hidden = false;
   document.getElementById("delivery-password").focus();
 }
 
-async function copyDeliveryUrl(silent) {
-  const url = document.getElementById("delivery-url").value.trim();
-  if (!url) return false;
-  try {
-    if (navigator.clipboard && navigator.clipboard.writeText) {
-      await navigator.clipboard.writeText(url);
+function wrapMemoLines(ctx, text, maxWidth) {
+  const chars = String(text || "").split("");
+  const lines = [];
+  let line = "";
+  chars.forEach((ch) => {
+    const next = line + ch;
+    if (ctx.measureText(next).width > maxWidth && line) {
+      lines.push(line);
+      line = ch;
     } else {
-      document.getElementById("delivery-url").select();
-      document.execCommand("copy");
+      line = next;
     }
-    if (!silent) {
-      await askNotice({ title: "已复制", text: url, ok: "知道了" });
-    }
-    return true;
-  } catch (err) {
-    document.getElementById("delivery-url").select();
-    if (!silent) {
-      await askNotice({ title: "请手动复制", text: url, ok: "知道了" });
-    }
-    return false;
-  }
+  });
+  if (line) lines.push(line);
+  return lines.length ? lines : [""];
+}
+
+function buildMemoCanvas(info) {
+  const width = 900;
+  const pad = 56;
+  const title = "您的登录信息";
+  const rows = [
+    { label: "登录地址", value: info.login_url || "" },
+    { label: "账号", value: info.name || "" },
+    { label: "密码", value: info.password || "" },
+    { label: "有效期", value: info.expires_on || "" }
+  ];
+  const canvas = document.createElement("canvas");
+  const ctx = canvas.getContext("2d");
+  ctx.font = "700 28px 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', sans-serif";
+  const contentWidth = width - pad * 2;
+  const measured = rows.map((row) => {
+    ctx.font = "700 28px 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', sans-serif";
+    const labelWidth = Math.ceil(ctx.measureText(row.label + "：").width);
+    ctx.font = "600 28px 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', sans-serif";
+    const valueLines = wrapMemoLines(ctx, row.value, contentWidth - labelWidth);
+    return { ...row, labelWidth, valueLines };
+  });
+  const lineHeight = 44;
+  const blockGap = 28;
+  let bodyHeight = 0;
+  measured.forEach((row) => {
+    bodyHeight += Math.max(1, row.valueLines.length) * lineHeight + blockGap;
+  });
+  const height = pad + 72 + 24 + bodyHeight + 48;
+  canvas.width = width;
+  canvas.height = height;
+
+  const bg = ctx.createLinearGradient(0, 0, width, height);
+  bg.addColorStop(0, "#f7fbf4");
+  bg.addColorStop(1, "#eef6f1");
+  ctx.fillStyle = bg;
+  ctx.fillRect(0, 0, width, height);
+
+  roundRect(ctx, 28, 28, width - 56, height - 56, 28);
+  ctx.fillStyle = "#ffffff";
+  ctx.fill();
+  ctx.strokeStyle = "#d7e5de";
+  ctx.lineWidth = 2;
+  ctx.stroke();
+
+  ctx.fillStyle = "#1f6b57";
+  ctx.font = "800 40px 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', sans-serif";
+  ctx.fillText(title, pad, pad + 48);
+
+  ctx.strokeStyle = "#d7e5de";
+  ctx.beginPath();
+  ctx.moveTo(pad, pad + 68);
+  ctx.lineTo(width - pad, pad + 68);
+  ctx.stroke();
+
+  let y = pad + 118;
+  measured.forEach((row) => {
+    ctx.fillStyle = "#5b7268";
+    ctx.font = "700 28px 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', sans-serif";
+    ctx.fillText(row.label + "：", pad, y);
+    ctx.fillStyle = "#15241f";
+    ctx.font = "600 28px 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', sans-serif";
+    row.valueLines.forEach((line, index) => {
+      ctx.fillText(line, pad + row.labelWidth, y + index * lineHeight);
+    });
+    y += Math.max(1, row.valueLines.length) * lineHeight + blockGap;
+  });
+
+  ctx.fillStyle = "#8aa097";
+  ctx.font = "600 20px 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', sans-serif";
+  ctx.fillText("请妥善保管，勿转发他人", pad, height - 40);
+  return canvas;
+}
+
+function roundRect(ctx, x, y, w, h, r) {
+  const radius = Math.min(r, w / 2, h / 2);
+  ctx.beginPath();
+  ctx.moveTo(x + radius, y);
+  ctx.arcTo(x + w, y, x + w, y + h, radius);
+  ctx.arcTo(x + w, y + h, x, y + h, radius);
+  ctx.arcTo(x, y + h, x, y, radius);
+  ctx.arcTo(x, y, x + w, y, radius);
+  ctx.closePath();
+}
+
+function canvasToBlob(canvas) {
+  return new Promise((resolve, reject) => {
+    canvas.toBlob((blob) => {
+      if (blob) resolve(blob);
+      else reject(new Error("图片生成失败"));
+    }, "image/png");
+  });
+}
+
+async function showDeliveryImage(info) {
+  const canvas = buildMemoCanvas(info);
+  const blob = await canvasToBlob(canvas);
+  revokeDeliveryBlob();
+  deliveryBlobUrl = URL.createObjectURL(blob);
+  deliveryFileName = (info.name || "account") + "-账号信息.png";
+  const preview = document.getElementById("delivery-preview");
+  preview.src = deliveryBlobUrl;
+  document.getElementById("delivery-path").textContent = "可预览后下载，发给对方即可。";
+  document.getElementById("delivery-result").hidden = false;
+  document.getElementById("delivery-download").hidden = false;
+}
+
+function downloadDeliveryImage() {
+  if (!deliveryBlobUrl) return;
+  const link = document.createElement("a");
+  link.href = deliveryBlobUrl;
+  link.download = deliveryFileName;
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
 }
 
 document.getElementById("delivery-close").addEventListener("click", closeDelivery);
 document.getElementById("delivery-cancel").addEventListener("click", closeDelivery);
-document.getElementById("delivery-copy").addEventListener("click", () => copyDeliveryUrl(false));
+document.getElementById("delivery-download").addEventListener("click", downloadDeliveryImage);
 document.getElementById("delivery-save").addEventListener("click", async () => {
   showError("delivery-error", "");
   if (!deliveryUser) {
@@ -1435,24 +1562,17 @@ document.getElementById("delivery-save").addEventListener("click", async () => {
       name: deliveryUser,
       password
     });
-    const url = data.share_url || "";
-    document.getElementById("delivery-url").value = url;
-    document.getElementById("delivery-path").textContent = data.path
-      ? ("已写入 " + data.path + "。可再点右侧「复制链接」。")
-      : "可再点右侧「复制链接」。";
-    document.getElementById("delivery-result").hidden = false;
-    document.getElementById("delivery-url").select();
-    const copied = await copyDeliveryUrl(true);
-    await askNotice({
-      title: copied ? "已生成并复制" : "已生成",
-      text: url || "分享链接已生成",
-      ok: "知道了"
+    await showDeliveryImage({
+      login_url: data.login_url || "",
+      name: data.name || deliveryUser,
+      password: data.password || password,
+      expires_on: data.expires_on || ""
     });
   } catch (err) {
     showError("delivery-error", err.message || "生成失败");
   } finally {
     saveBtn.disabled = false;
-    saveBtn.textContent = "生成";
+    saveBtn.textContent = "生成图片";
   }
 });
 

@@ -449,6 +449,26 @@ impl QuarkDrive {
         Ok(res.data.fid)
     }
 
+    /// Open a streaming HTTP response for a cloud file (no local disk write).
+    pub async fn stream_download(&self, fid: &str) -> Result<reqwest::Response> {
+        let url = self.get_download_url(fid).await?;
+        let cookie = self.resolve_cookies().await;
+        let response = self
+            .stream_client
+            .get(&url)
+            .header("Cookie", &cookie)
+            .send()
+            .await
+            .context("连接下载地址失败")?;
+        let status = response.status();
+        if !status.is_success() {
+            let text = response.text().await.unwrap_or_default();
+            let snippet: String = text.chars().take(180).collect();
+            bail!("下载失败 HTTP {status}: {snippet}");
+        }
+        Ok(response)
+    }
+
     pub async fn download_to_file(
         &self,
         url: &str,

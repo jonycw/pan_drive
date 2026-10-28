@@ -1,4 +1,21 @@
 services:
+  mysql:
+    image: mysql:8.0
+    container_name: pan-drive-mysql
+    restart: unless-stopped
+    environment:
+      MYSQL_ROOT_PASSWORD: change_me
+      MYSQL_DATABASE: pan_meta
+    ports:
+      - "3306:3306"
+    volumes:
+      - mysql_data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "127.0.0.1", "-uroot", "-pchange_me"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
   quarkdrive:
     build:
       context: .
@@ -6,13 +23,14 @@ services:
     image: quarkdrive-webdav:local
     container_name: quarkdrive-webdav
     restart: unless-stopped
+    depends_on:
+      mysql:
+        condition: service_healthy
     ports:
-      - "28080:8080"
+      - "8080:8080"
     volumes:
       - ./config.json:/app/config.json:ro
       - ./data:/app/data
-    networks:
-      - web_public
-networks:
-  web_public:
-    external: true
+
+volumes:
+  mysql_data:

@@ -3,11 +3,11 @@ name = "quarkdrive-webdav"
 version = "1.3.9"
 edition = "2024"
 
-description = "A WebDAV client for quarkdrive"
-authors = ["chenqimiao1994@126.com"]
+description = "Quark drive WebDAV with share-link download portal"
+authors = ["jonycw"]
 license = "MIT"
-homepage = "https://github.com/chenqimiao/quarkdrive-webdav"
-repository = "https://github.com/chenqimiao/quarkdrive-webdav.git"
+homepage = "https://github.com/jonycw/pan_drive"
+repository = "https://github.com/jonycw/pan_drive.git"
 readme = "README.md"
 
 [dependencies]

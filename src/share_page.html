@@ -64,6 +64,9 @@ input:focus, textarea:focus, .picker:focus-visible { outline: 3px solid rgba(15,
 .picker-go { flex: none; color: var(--accent); font-size: 13px; font-weight: 800; }
 .primary:disabled, .solid:disabled { background: #8fbfb0; cursor: not-allowed; }
 .form-error { margin-top: 10px; color: var(--danger); font-size: 13px; }
+.save-banner { margin-top: 12px; padding: 12px 14px; border-radius: 12px; background: #e8f6ef; border: 1px solid #b7e0cc; display: flex; gap: 12px; align-items: center; justify-content: space-between; flex-wrap: wrap; }
+.save-banner p { margin: 0; font-size: 13px; color: var(--ink); font-weight: 700; }
+.save-banner .solid { flex: none; }
 .text-btn { border: 0; background: none; color: var(--accent); cursor: pointer; padding: 0; font-weight: 800; min-height: 0; text-decoration: none; }
 .text-btn:hover { text-decoration: underline; }
 .task { padding: 12px 0; border-top: 1px solid var(--line); }
@@ -143,17 +146,21 @@ input:focus, textarea:focus, .picker:focus-visible { outline: 3px solid rgba(15,
     <form class="panel" id="form">
       <span class="field-label">本机保存目录</span>
       <button type="button" class="picker" id="pick-dir">
-        <span class="picker-text placeholder" id="pick-text">选择本机目录</span>
+        <span class="picker-text placeholder" id="pick-text">选择本机文件夹</span>
         <span class="picker-go">选择</span>
       </button>
       <label class="field-label" for="links" style="margin-top:14px">分享链接</label>
       <textarea id="links" placeholder="一次粘贴一条。可以直接粘贴夸克复制出来的整段内容&#10;链接：https://pan.quark.cn/s/xxxx&#10;提取码：xxxx"></textarea>
-      <p class="hint">一次只解析一条分享。整段文字里的链接和提取码会自动识别。先选择本机保存目录。点开始下载后先勾选文件，确认后才会转存并下载到这个目录。</p>
+      <p class="hint">一次只解析一条分享。先选择保存位置：HTTPS/本地可用「选文件夹」；普通 HTTP 会用浏览器默认下载目录。</p>
       <div class="actions-row">
         <button class="primary" id="start" type="submit">开始下载</button>
         <button type="button" class="ghost record-btn" id="open-records">下载记录<span class="record-badge" id="record-badge" hidden>0</span></button>
       </div>
       <p class="form-error" id="form-error" hidden></p>
+      <div class="save-banner" id="save-banner" hidden>
+        <p id="save-banner-text">有文件已转存完成，点下面保存到本机。</p>
+        <button type="button" class="solid" id="save-local">保存到本机</button>
+      </div>
     </form>
   </main>
 </div>
@@ -169,21 +176,6 @@ input:focus, textarea:focus, .picker:focus-visible { outline: 3px solid rgba(15,
     <div class="crumbs" id="file-crumbs"></div>
     <p class="dialog-error" id="file-error" hidden></p>
     <div class="file-list" id="file-list"></div>
-  </div>
-</div>
-<div class="modal" id="dir-modal" hidden>
-  <div class="dialog" id="dir-dialog" role="dialog" aria-modal="true" aria-labelledby="dir-title">
-    <header>
-      <h2 id="dir-title">选择本机保存目录</h2>
-      <button type="button" class="text-btn" id="dir-close">关闭</button>
-    </header>
-    <div class="crumbs" id="dir-crumbs"></div>
-    <p class="dialog-error" id="dir-error" hidden></p>
-    <div class="dir-list" id="dir-list"></div>
-    <footer>
-      <button type="button" class="ghost" id="dir-cancel">取消</button>
-      <button type="button" class="solid" id="dir-select" hidden>选择此目录</button>
-    </footer>
   </div>
 </div>
 <div class="modal" id="pick-modal" hidden>
@@ -252,9 +244,15 @@ let filesPath = "";
 let filesTimer = 0;
 let filesBusy = false;
 let localDir = "";
-let currentDir = "";
 let pendingText = "";
 let openLogId = 0;
+let dirHandle = null;
+let useDefaultDownload = false;
+let currentUser = "";
+let syncedKeys = new Set();
+let syncingBrowser = false;
+const BROWSER_MARK = "__browser__";
+const DEFAULT_DIR_LABEL = "浏览器默认下载目录";
 const recordModal = document.getElementById("record-modal");
 const logModal = document.getElementById("log-modal");
 const recordButton = document.getElementById("open-records");
@@ -265,12 +263,6 @@ const pickError = document.getElementById("pick-error");
 const pickGo = document.getElementById("pick-go");
 let pickTextValue = "";
 const pickText = document.getElementById("pick-text");
-const dirModal = document.getElementById("dir-modal");
-const dirDialog = document.getElementById("dir-dialog");
-const dirCrumbs = document.getElementById("dir-crumbs");
-const dirList = document.getElementById("dir-list");
-const dirError = document.getElementById("dir-error");
-const dirSelect = document.getElementById("dir-select");
 
 function showError(el, message) {
   el.hidden = !message;
@@ -424,6 +416,14 @@ function renderTasks() {
       cancel.addEventListener("click", () => cancelTask(task.id));
       actions.append(cancel);
     }
+    if (task.phase === "完成" && (useDefaultDownload || dirHandle)) {
+      const save = document.createElement("button");
+      save.type = "button";
+      save.className = "text-btn";
+      save.textContent = "保存到本机";
+      save.addEventListener("click", () => syncBrowserFiles({ silent: false }));
+      actions.append(save);
+    }
     row.append(actions);
     tasksEl.append(row);
   });
@@ -450,7 +450,17 @@ async function refreshTasks() {
   const data = await call("/api/tasks");
   tasks = data.tasks || [];
   renderTasks();
-  return tasks.some((task) => task.phase === "排队" || task.phase === "下载中");
+  const active = tasks.some((task) => task.phase === "排队" || task.phase === "下载中");
+  const done = tasks.some((task) => task.phase === "完成");
+  if (done && dirHandle) {
+    // File System Access API 可在后台写入；浏览器默认下载必须由用户点击触发
+    await syncBrowserFiles({ silent: true });
+  } else if (done && useDefaultDownload) {
+    await refreshSaveBanner();
+  } else {
+    hideSaveBanner();
+  }
+  return active;
 }
 
 async function poll() {
@@ -592,136 +602,265 @@ function showLogin() {
 function showApp(data) {
   loginForm.hidden = true;
   app.hidden = false;
-  whoName.textContent = data.name || "";
+  currentUser = data.name || "";
+  whoName.textContent = currentUser;
   whoExpire.textContent = data.expires_on ? ("有效期至 " + data.expires_on) : "";
-  showLocalDir(data.download_dir || "");
-  poll();
+  restoreBrowserDir(data).then(() => poll());
 }
 
-function showLocalDir(path) {
-  localDir = path || "";
-  pickText.textContent = localDir || "选择本机目录";
+function showLocalDir(label) {
+  localDir = label || "";
+  pickText.textContent = localDir || "选择本机文件夹";
   pickText.classList.toggle("placeholder", !localDir);
 }
 
-function isMobile() {
-  return window.matchMedia("(max-width: 800px)").matches;
-}
-function closeDirModal() {
-  dirModal.hidden = true;
-  pendingText = "";
-}
-async function chooseDir(path) {
-  showError(dirError, "");
-  const pending = pendingText;
-  try {
-    const data = await call("/api/download-dir", { path });
-    showLocalDir(data.download_dir || path);
-    pendingText = "";
-    dirModal.hidden = true;
-    showError(formError, "");
-    if (pending) await openSharePick(pending);
-  } catch (err) {
-    showError(dirError, err.message || "没有保存这个目录");
-  }
-}
-function dirCrumbsFor(path) {
-  const items = [{ name: "此电脑", path: "" }];
-  if (!path) return items;
-  const normalized = String(path).replace(/\//g, "\\");
-  const drive = normalized.match(/^([A-Za-z]:)/);
-  if (!drive) return items;
-  let acc = drive[1] + "\\";
-  items.push({ name: drive[1] + "\\", path: acc });
-  const rest = normalized.slice(drive[1].length).replace(/^\\/, "").replace(/\\$/, "");
-  if (rest) {
-    rest.split("\\").forEach((part) => {
-      acc += part;
-      items.push({ name: part, path: acc });
-      acc += "\\";
-    });
-  }
-  return items;
-}
-function renderDirCrumbs(path) {
-  dirCrumbs.textContent = "";
-  dirCrumbsFor(path).forEach((item, index, items) => {
-    if (index) dirCrumbs.append(" / ");
-    if (index === items.length - 1) {
-      const current = document.createElement("span");
-      current.textContent = item.name;
-      dirCrumbs.append(current);
-    } else {
-      const button = document.createElement("button");
-      button.type = "button";
-      button.textContent = item.name;
-      button.addEventListener("click", () => loadDir(item.path));
-      dirCrumbs.append(button);
-    }
+function openDirDb() {
+  return new Promise((resolve, reject) => {
+    const req = indexedDB.open("quark-browser-dir", 1);
+    req.onupgradeneeded = () => {
+      const db = req.result;
+      if (!db.objectStoreNames.contains("dirs")) db.createObjectStore("dirs");
+    };
+    req.onsuccess = () => resolve(req.result);
+    req.onerror = () => reject(req.error || new Error("无法打开本机目录存储"));
   });
 }
-function renderDirEntries(data) {
-  currentDir = data.path || "";
-  dirSelect.hidden = !data.can_select;
-  renderDirCrumbs(currentDir);
-  dirList.textContent = "";
-  const mobile = dirDialog.dataset.mode === "mobile";
-  const entries = data.entries || [];
-  if (!entries.length) {
-    const empty = document.createElement("p");
-    empty.className = "empty";
-    empty.textContent = "没有可以进入的子目录";
-    dirList.append(empty);
+
+async function saveDirHandle(user, handle) {
+  const db = await openDirDb();
+  await new Promise((resolve, reject) => {
+    const tx = db.transaction("dirs", "readwrite");
+    tx.objectStore("dirs").put({ handle, name: handle.name || "本机文件夹" }, user);
+    tx.oncomplete = () => resolve();
+    tx.onerror = () => reject(tx.error || new Error("保存本机目录失败"));
+  });
+  db.close();
+}
+
+async function loadDirHandle(user) {
+  if (!user) return null;
+  const db = await openDirDb();
+  const row = await new Promise((resolve, reject) => {
+    const tx = db.transaction("dirs", "readonly");
+    const req = tx.objectStore("dirs").get(user);
+    req.onsuccess = () => resolve(req.result || null);
+    req.onerror = () => reject(req.error || new Error("读取本机目录失败"));
+  });
+  db.close();
+  return row;
+}
+
+async function ensureDirPermission(handle) {
+  if (!handle || !handle.queryPermission) return false;
+  const options = { mode: "readwrite" };
+  if ((await handle.queryPermission(options)) === "granted") return true;
+  if ((await handle.requestPermission(options)) === "granted") return true;
+  return false;
+}
+
+function canPickFolder() {
+  return typeof window.showDirectoryPicker === "function" && window.isSecureContext;
+}
+
+function defaultDownloadKey(user) {
+  return "qd-default-dl:" + (user || "");
+}
+
+async function enableDefaultDownload(notice) {
+  await call("/api/download-dir", {
+    path: BROWSER_MARK,
+    label: DEFAULT_DIR_LABEL
+  });
+  dirHandle = null;
+  useDefaultDownload = true;
+  try {
+    localStorage.setItem(defaultDownloadKey(currentUser), "1");
+  } catch (err) {}
+  showLocalDir(DEFAULT_DIR_LABEL);
+  if (notice) showError(formError, notice);
+  const pending = pendingText;
+  pendingText = "";
+  if (pending) await openSharePick(pending);
+}
+
+async function restoreBrowserDir(data) {
+  const browser = !!(data && data.browser) || data.download_dir === BROWSER_MARK;
+  if (!browser) {
+    dirHandle = null;
+    useDefaultDownload = false;
+    showLocalDir("");
     return;
   }
-  entries.forEach((entry) => {
-    const row = document.createElement("div");
-    row.className = "dir-row";
-    const main = document.createElement("button");
-    main.type = "button";
-    main.className = "dir-main";
-    main.textContent = entry.name;
-    main.addEventListener("click", () => {
-      if (mobile || !entry.exists) chooseDir(entry.path);
-      else loadDir(entry.path);
-    });
-    row.append(main);
-    if (mobile && entry.exists) {
-      const deeper = document.createElement("button");
-      deeper.type = "button";
-      deeper.className = "dir-deeper";
-      deeper.textContent = "下级";
-      deeper.addEventListener("click", () => loadDir(entry.path));
-      row.append(deeper);
-    }
-    dirList.append(row);
-  });
-}
-async function loadDir(path) {
-  showError(dirError, "");
-  dirList.textContent = "";
-  const loading = document.createElement("p");
-  loading.className = "empty";
-  loading.textContent = "正在读取目录…";
-  dirList.append(loading);
-  const url = path ? ("/api/dirs?path=" + encodeURIComponent(path)) : "/api/dirs";
+  if (canPickFolder()) {
+    try {
+      const saved = await loadDirHandle(currentUser);
+      if (saved && saved.handle) {
+        if (await ensureDirPermission(saved.handle)) {
+          dirHandle = saved.handle;
+          useDefaultDownload = false;
+          showLocalDir(saved.name || saved.handle.name || "本机文件夹");
+          return;
+        }
+      }
+    } catch (err) {}
+  }
+  let preferDefault = false;
   try {
-    const data = await call(url);
-    renderDirEntries(data);
-    return true;
+    preferDefault = localStorage.getItem(defaultDownloadKey(currentUser)) === "1";
+  } catch (err) {}
+  if (preferDefault || !canPickFolder()) {
+    dirHandle = null;
+    useDefaultDownload = true;
+    showLocalDir(DEFAULT_DIR_LABEL);
+    return;
+  }
+  dirHandle = null;
+  useDefaultDownload = false;
+  showLocalDir("");
+}
+
+async function openPicker() {
+  showError(formError, "");
+  if (!canPickFolder()) {
+    const why = window.isSecureContext
+      ? "当前浏览器不支持自选文件夹。"
+      : "当前是普通 HTTP 访问（非 HTTPS / localhost），Chrome 不允许自选文件夹。";
+    await enableDefaultDownload(why + "已改为使用浏览器默认下载目录；配置 HTTPS 后可自选文件夹。");
+    return;
+  }
+  try {
+    const handle = await window.showDirectoryPicker({ mode: "readwrite" });
+    if (!(await ensureDirPermission(handle))) {
+      showError(formError, "没有获得写入本机文件夹的权限");
+      return;
+    }
+    await call("/api/download-dir", {
+      path: BROWSER_MARK,
+      label: handle.name || "本机文件夹"
+    });
+    dirHandle = handle;
+    useDefaultDownload = false;
+    try {
+      localStorage.removeItem(defaultDownloadKey(currentUser));
+    } catch (err) {}
+    await saveDirHandle(currentUser, handle);
+    showLocalDir(handle.name || "本机文件夹");
+    const pending = pendingText;
+    pendingText = "";
+    if (pending) await openSharePick(pending);
   } catch (err) {
-    dirList.textContent = "";
-    showError(dirError, err.message || "无法读取目录");
-    return false;
+    if (err && err.name === "AbortError") return;
+    showError(formError, (err && err.message) || "没有选中本机文件夹");
   }
 }
-async function openPicker() {
-  dirDialog.dataset.mode = isMobile() ? "mobile" : "desktop";
-  dirModal.hidden = false;
-  if (!isMobile() && localDir) {
-    if (await loadDir(localDir)) return;
+
+async function writeBrowserFile(rel, blob) {
+  const parts = String(rel || "").split("/").filter(Boolean);
+  const fileName = parts.pop();
+  if (!fileName) return;
+  let dir = dirHandle;
+  for (const part of parts) {
+    dir = await dir.getDirectoryHandle(part, { create: true });
   }
-  await loadDir("");
+  const file = await dir.getFileHandle(fileName, { create: true });
+  const writable = await file.createWritable();
+  await writable.write(blob);
+  await writable.close();
+}
+
+function triggerBrowserDownload(blob, fileName) {
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = fileName || "download";
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+
+function hideSaveBanner() {
+  const banner = document.getElementById("save-banner");
+  if (banner) banner.hidden = true;
+}
+
+function browserFileKey(file) {
+  return String(file.fid || file.rel) + ":" + String(file.size || 0);
+}
+
+async function pendingBrowserFiles() {
+  const data = await call("/api/browser-files");
+  return (data.files || []).filter((file) => !syncedKeys.has(browserFileKey(file)));
+}
+
+async function refreshSaveBanner() {
+  const banner = document.getElementById("save-banner");
+  const text = document.getElementById("save-banner-text");
+  if (!banner || !text) return;
+  try {
+    const pending = await pendingBrowserFiles();
+    if (!pending.length) {
+      banner.hidden = true;
+      return;
+    }
+    text.textContent = "有 " + pending.length + " 个文件已转存到网盘。请点「保存到本机」（直接传到你的电脑，不写服务器磁盘）。";
+    banner.hidden = false;
+  } catch (err) {
+    banner.hidden = true;
+  }
+}
+
+async function syncBrowserFiles(options) {
+  const silent = !!(options && options.silent);
+  if ((!dirHandle && !useDefaultDownload) || syncingBrowser) return { saved: 0, total: 0 };
+  syncingBrowser = true;
+  let saved = 0;
+  let total = 0;
+  try {
+    if (dirHandle && !(await ensureDirPermission(dirHandle))) {
+      if (!silent) showError(formError, "没有本机文件夹写入权限，请重新选择");
+      return { saved: 0, total: 0 };
+    }
+    const data = await call("/api/browser-files");
+    const files = data.files || [];
+    total = files.length;
+    for (const file of files) {
+      const key = browserFileKey(file);
+      if (syncedKeys.has(key)) continue;
+      if (!file.fid) continue;
+      const res = await fetch("/api/browser-files/raw?fid=" + encodeURIComponent(file.fid), {
+        credentials: "same-origin",
+        headers: { "Accept": "application/octet-stream" }
+      });
+      if (!res.ok) continue;
+      const blob = await res.blob();
+      if (dirHandle) {
+        await writeBrowserFile(file.rel, blob);
+      } else {
+        const name = String(file.rel || "").split("/").pop() || "download";
+        triggerBrowserDownload(blob, name);
+        // 多个文件时稍隔开，减少被浏览器合并拦截
+        await new Promise((resolve) => setTimeout(resolve, 250));
+      }
+      syncedKeys.add(key);
+      saved += 1;
+    }
+    if (!silent) {
+      if (saved > 0) {
+        const tip = document.getElementById("save-banner-text");
+        if (tip) tip.textContent = "已保存 " + saved + " 个文件到本机。";
+        showError(formError, "");
+      } else {
+        showError(formError, "没有新的文件需要保存（可能已保存过，或浏览器拦截了下载）");
+      }
+    }
+    await refreshSaveBanner();
+  } catch (err) {
+    if (!silent) showError(formError, (err && err.message) || "保存到本机失败");
+  } finally {
+    syncingBrowser = false;
+  }
+  return { saved, total };
 }
 
 loginForm.addEventListener("submit", async (event) => {
@@ -861,10 +1000,7 @@ fileModal.addEventListener("click", (event) => {
   if (event.target === fileModal) closeFiles();
 });
 document.getElementById("pick-dir").addEventListener("click", openPicker);
-document.getElementById("dir-close").addEventListener("click", closeDirModal);
-document.getElementById("dir-cancel").addEventListener("click", closeDirModal);
-dirSelect.addEventListener("click", () => { if (currentDir) chooseDir(currentDir); });
-dirModal.addEventListener("click", (event) => { if (event.target === dirModal) closeDirModal(); });
+document.getElementById("save-local").addEventListener("click", () => syncBrowserFiles({ silent: false }));
 document.getElementById("pick-close").addEventListener("click", closeSharePick);
 document.getElementById("pick-cancel").addEventListener("click", closeSharePick);
 document.getElementById("pick-go").addEventListener("click", () => confirmPick());
@@ -904,7 +1040,6 @@ document.addEventListener("keydown", (event) => {
   if (!logModal.hidden) closeLog();
   else if (!recordModal.hidden) closeRecords();
   else if (!pickModal.hidden) closeSharePick();
-  else if (!dirModal.hidden) closeDirModal();
   else if (!fileModal.hidden) closeFiles();
 });
 
@@ -913,9 +1048,12 @@ document.getElementById("logout").addEventListener("click", async () => {
   tasks = [];
   renderTasks();
   closeFiles();
-  closeDirModal();
   closeSharePick();
   closeRecords();
+  dirHandle = null;
+  useDefaultDownload = false;
+  currentUser = "";
+  showLocalDir("");
   showLogin();
 });
 

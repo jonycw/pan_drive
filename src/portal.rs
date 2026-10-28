@@ -330,6 +330,36 @@ impl Portal {
         }
     }
 
+    /// Marker: browser saves to the user's PC (no server-side download directory).
+    pub const BROWSER_DIR_MARK: &'static str = "__browser__";
+
+    pub fn data_dir(&self) -> PathBuf {
+        self.path
+            .parent()
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| PathBuf::from("."))
+    }
+
+    pub fn is_browser_download(&self, name: &str) -> bool {
+        self.user_download_dir(name) == Self::BROWSER_DIR_MARK
+    }
+
+    pub fn resolve_download_dir(&self, name: &str) -> Result<PathBuf, String> {
+        let raw = self.user_download_dir(name);
+        let raw = raw.trim();
+        if raw.is_empty() {
+            return Err("请先选择本机保存目录".to_string());
+        }
+        if raw == Self::BROWSER_DIR_MARK {
+            return Err("浏览器本机保存模式不写服务器目录".to_string());
+        }
+        let path = PathBuf::from(raw);
+        if !path.is_absolute() {
+            return Err("本机目录请选择绝对路径".to_string());
+        }
+        Ok(path)
+    }
+
     pub fn user_download_dir(&self, name: &str) -> String {
         lock(&self.disk)
             .users
@@ -344,7 +374,7 @@ impl Portal {
         if path.is_empty() {
             return Err("请先选择本机保存目录".to_string());
         }
-        if !Path::new(path).is_absolute() {
+        if path != Self::BROWSER_DIR_MARK && !Path::new(path).is_absolute() {
             return Err("本机目录请选择绝对路径".to_string());
         }
         let mut disk = lock(&self.disk);

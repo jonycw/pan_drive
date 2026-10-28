@@ -25,5 +25,6 @@ quark.cookie
 portal.json
 database.json
 config.json
+config.json.dev
 data/
 .cursor/
